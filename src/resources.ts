@@ -1,0 +1,39 @@
+import type { McpServer } from "@modelcontextprotocol/server";
+import { listWarehouses } from "./api.js";
+import { DOCUMENT_TYPES } from "./doc-types.js";
+import { summarizeWarehouse } from "./summarize.js";
+import { describeError, type ToolContext } from "./tools/shared.js";
+
+export function registerResources(server: McpServer, ctx: ToolContext): void {
+  server.registerResource(
+    "document-types",
+    "metakocka://document-types",
+    {
+      title: "Metakocka document types",
+      description: "Document type codes used by this server, with their Slovenian names as shown in Metakocka.",
+      mimeType: "application/json",
+    },
+    async (uri) => ({
+      contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(DOCUMENT_TYPES, null, 2) }],
+    }),
+  );
+
+  server.registerResource(
+    "warehouses",
+    "metakocka://warehouses",
+    {
+      title: "Warehouses",
+      description: "The company's warehouses (id, mark, name, address).",
+      mimeType: "application/json",
+    },
+    async (uri) => {
+      let text: string;
+      try {
+        text = JSON.stringify((await listWarehouses(ctx.getClient())).map(summarizeWarehouse), null, 2);
+      } catch (error) {
+        text = JSON.stringify({ error: describeError(error) });
+      }
+      return { contents: [{ uri: uri.href, mimeType: "application/json", text }] };
+    },
+  );
+}

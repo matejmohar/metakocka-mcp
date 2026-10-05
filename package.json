@@ -1,0 +1,51 @@
+{
+  "name": "metakocka-mcp",
+  "version": "0.1.0",
+  "description": "Model Context Protocol (MCP) server for the Metakocka ERP — let Claude and other AI assistants read your documents, invoices, products, stock and partners.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "metakocka",
+    "erp",
+    "claude",
+    "ai"
+  ],
+  "license": "MIT",
+  "author": "Matej Mohar <matej@mohar.dev>",
+  "homepage": "https://martej.com",
+  "type": "module",
+  "bin": {
+    "metakocka-mcp": "dist/index.js"
+  },
+  "main": "dist/server.js",
+  "types": "dist/server.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "inspect": "npx @modelcontextprotocol/inspector node dist/index.js",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.3.1",
+    "zod": "^4.2.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.3.1",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.20.0",
+    "typescript": "^6.0.0",
+    "vitest": "^5.0.3"
+  }
+}
