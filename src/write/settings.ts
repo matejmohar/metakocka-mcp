@@ -12,8 +12,14 @@ export type WritableDocType = (typeof WRITABLE_TYPES)[keyof typeof WRITABLE_TYPE
 
 export interface WriteSettings {
   docTypes: WritableDocType[];
-  /** "always": the user confirms every document in their client before it is saved. "never": no confirmation. */
-  confirm: "always" | "never";
+  /**
+   * How the user confirms each document before it is saved:
+   * - "client" (default): a confirmation prompt (MCP elicitation) where the client supports it; otherwise the
+   *   client's own approval of the commit_document call, which must carry the draft's exact summary.
+   * - "elicitation": only a confirmation prompt; clients without elicitation can't save at all.
+   * - "never": no confirmation.
+   */
+  confirm: "client" | "elicitation" | "never";
   /** Timeout for put_document; Metakocka can take well over the read timeout to insert a document. */
   timeoutMs: number;
   /** JSONL audit log of every write; undefined = log to stderr (HTTP server). */
@@ -44,10 +50,10 @@ export function writeSettingsFromEnv(env: NodeJS.ProcessEnv = process.env): Writ
   }
 
   // "true"/"false" come from the extension's "Confirm each document" checkbox.
-  const confirmRaw = (envValue(env, "METAKOCKA_WRITE_CONFIRM") ?? "always").toLowerCase();
-  const confirm = confirmRaw === "true" ? "always" : confirmRaw === "false" ? "never" : confirmRaw;
-  if (confirm !== "always" && confirm !== "never") {
-    throw new ConfigError('METAKOCKA_WRITE_CONFIRM must be "always" (default) or "never".');
+  const confirmRaw = (envValue(env, "METAKOCKA_WRITE_CONFIRM") ?? "client").toLowerCase();
+  const confirm = confirmRaw === "true" ? "client" : confirmRaw === "false" ? "never" : confirmRaw;
+  if (confirm !== "client" && confirm !== "elicitation" && confirm !== "never") {
+    throw new ConfigError('METAKOCKA_WRITE_CONFIRM must be "client" (default), "elicitation" or "never".');
   }
 
   const timeoutRaw = envValue(env, "METAKOCKA_WRITE_TIMEOUT_SECONDS");

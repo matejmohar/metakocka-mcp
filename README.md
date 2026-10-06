@@ -159,7 +159,7 @@ newer version exists.
 | `METAKOCKA_CACHE_SECONDS` | no | `300` — how long warehouses and partner lookups are reused; `0` turns caching off |
 | `METAKOCKA_PDF_DIR` | no | `Downloads/Metakocka` — where `get_document_pdf` saves files |
 | `METAKOCKA_WRITE` | no | off — `offers` allows creating offers, see [Creating offers](#creating-offers) |
-| `METAKOCKA_WRITE_CONFIRM` | no | `always` — you confirm each document in your client; `never` saves without asking |
+| `METAKOCKA_WRITE_CONFIRM` | no | `client` — you confirm each document in a prompt, or by approving the save in your client; `elicitation` — prompts only; `never` — no confirmation |
 | `METAKOCKA_WRITE_TIMEOUT_SECONDS` | no | `120` — how long to wait for Metakocka to save a document |
 | `METAKOCKA_WRITE_LOG` | no | `~/.metakocka-mcp/writes.jsonl` — audit log of every write |
 
@@ -227,9 +227,14 @@ Strict rules, enforced by the server rather than left to the assistant:
   You can still set a price or discount for a line.
 - **Draft first, then save.** `draft_document` checks everything and returns a summary; nothing is saved yet.
   `commit_document` saves exactly that draft and nothing else, at most once. Drafts expire after 15 minutes.
-- **You confirm every offer** in your client before it is saved (MCP elicitation). A client that can't show
-  confirmation prompts can't save documents at all. To save without asking, set `METAKOCKA_WRITE_CONFIRM=never` (or turn
-  off **Confirm each document** in the extension).
+- **You confirm every offer** in your client before it is saved:
+  - in a confirmation prompt, where the client supports them (MCP elicitation);
+  - otherwise (Claude Desktop, Claude Code) by approving the `commit_document` call: the approval prompt shows the
+    offer's summary, and the server saves only if that summary is exactly the draft's. **Don't choose "Always allow"
+    for `commit_document`**, or there is no prompt left to confirm in.
+
+  `METAKOCKA_WRITE_CONFIRM=elicitation` accepts only confirmation prompts (clients without them can't save);
+  `never` saves without asking (or turn off **Confirm each document** in the extension).
 - **Never saved twice.** Saving is never retried automatically. If Metakocka doesn't answer, the result says the
   outcome is unknown, and the next attempt first looks for the offer in Metakocka.
 - **Checked afterwards.** The saved offer is read back and compared with what you confirmed; any difference is

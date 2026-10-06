@@ -25,7 +25,7 @@ afterEach(async () => {
   for (const c of cleanups.splice(0).reverse()) await c();
 });
 
-const SETTINGS: WriteSettings = { docTypes: ["sales_offer"], confirm: "always", timeoutMs: 120_000 };
+const SETTINGS: WriteSettings = { docTypes: ["sales_offer"], confirm: "client", timeoutMs: 120_000 };
 
 /** A write context with a silent audit log. */
 const quiet = (settings: WriteSettings = SETTINGS, drafts = new DraftStore()): WriteContext => ({ settings, drafts, journal: async () => {} });
@@ -165,16 +165,18 @@ describe("write tools are opt-in", () => {
   it("settings: off by default, offers enables, unknown values are refused", () => {
     expect(writeSettingsFromEnv({})).toBeUndefined();
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "off" })).toBeUndefined();
-    expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers" })).toMatchObject({ docTypes: ["sales_offer"], confirm: "always", timeoutMs: 120_000 });
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers" })).toMatchObject({ docTypes: ["sales_offer"], confirm: "client", timeoutMs: 120_000 });
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers", METAKOCKA_WRITE_CONFIRM: "elicitation" })?.confirm).toBe("elicitation");
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers", METAKOCKA_WRITE_CONFIRM: "never" })?.confirm).toBe("never");
     expect(() => writeSettingsFromEnv({ METAKOCKA_WRITE: "offers,invoices" })).toThrow(ConfigError);
     // The Claude Desktop extension's checkboxes.
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "false", METAKOCKA_WRITE_CONFIRM: "true" })).toBeUndefined();
-    expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "true", METAKOCKA_WRITE_CONFIRM: "true" })).toMatchObject({ docTypes: ["sales_offer"], confirm: "always" });
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "true", METAKOCKA_WRITE_CONFIRM: "true" })).toMatchObject({ docTypes: ["sales_offer"], confirm: "client" });
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "true", METAKOCKA_WRITE_CONFIRM: "false" })?.confirm).toBe("never");
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "${user_config.allow_offers}" })).toBeUndefined();
     expect(() => writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "yes please" })).toThrow(ConfigError);
     expect(() => writeSettingsFromEnv({ METAKOCKA_WRITE: "offers", METAKOCKA_WRITE_CONFIRM: "sometimes" })).toThrow(ConfigError);
+    expect(() => writeSettingsFromEnv({ METAKOCKA_WRITE: "offers", METAKOCKA_WRITE_CONFIRM: "always" })).toThrow(ConfigError);
   });
 
   it("HTTP mode refuses to enable writing without a bearer token", () => {
@@ -331,13 +333,43 @@ describe("commit_document", () => {
     expect(fake.puts()).toHaveLength(1);
   });
 
-  it("refuses to save when the client can't ask the user", async () => {
+  it("confirm=elicitation refuses to save when the client can't show a confirmation prompt", async () => {
     const fake = metakocka();
-    const { client } = await connect(fake, { elicit: false });
+    const { client } = await connect(fake, { write: quiet({ ...SETTINGS, confirm: "elicitation" }), elicit: false });
     const { body: d } = await draft(client);
     const r = await client.callTool({ name: "commit_document", arguments: { draft_id: d.draft_id } });
     expect(r.isError).toBe(true);
     expect(parse(r)).toMatch(/Nothing was saved.*can't show confirmation prompts/);
+    expect(fake.puts()).toHaveLength(0);
+  });
+
+  it("confirm=client without elicitation: saves only with the draft's exact summary, which the client shows when approving", async () => {
+    const fake = metakocka();
+    const { client, prompts } = await connect(fake, { elicit: false });
+    expect(client.getInstructions()).toMatch(/confirm_summary/);
+    const { body: d } = await draft(client);
+    expect(d.next).toMatch(/confirm_summary set to the summary/);
+    const commit = (args: Record<string, unknown>) => client.callTool({ name: "commit_document", arguments: { draft_id: d.draft_id, ...args } });
+
+    const missing = await commit({});
+    expect(missing.isError).toBe(true);
+    expect(parse(missing)).toMatch(/Nothing was saved\. Pass confirm_summary/);
+    const other = await commit({ confirm_summary: d.summary.replace("152,50", "15,25") });
+    expect(parse(other)).toMatch(/does not match the draft/);
+    expect(fake.puts()).toHaveLength(0);
+
+    expect(parse(await commit({ confirm_summary: `  ${d.summary}\n` }))).toMatchObject({ status: "created", number: "3/2026" });
+    expect(fake.puts()).toHaveLength(1);
+    expect(prompts).toHaveLength(0);
+  });
+
+  it("confirm=client prefers a confirmation prompt where the client has one, and ignores confirm_summary then", async () => {
+    const fake = metakocka();
+    const { client, prompts } = await connect(fake, { answer: { action: "decline" } });
+    const { body: d } = await draft(client);
+    const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: d.draft_id, confirm_summary: d.summary } }));
+    expect(r).toMatchObject({ status: "cancelled" });
+    expect(prompts).toHaveLength(1);
     expect(fake.puts()).toHaveLength(0);
   });
 

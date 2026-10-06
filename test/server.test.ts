@@ -125,7 +125,7 @@ describe("MCP server", () => {
   });
 
   it("lists the same tools as the .mcpb manifest (with creating offers turned on)", async () => {
-    const write = { settings: { docTypes: ["sales_offer" as const], confirm: "always" as const, timeoutMs: 1000 }, drafts: new DraftStore(), journal: async () => {} };
+    const write = { settings: { docTypes: ["sales_offer" as const], confirm: "client" as const, timeoutMs: 1000 }, drafts: new DraftStore(), journal: async () => {} };
     const { client } = await setup({}, { write });
     const { tools } = await client.listTools();
     const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8")) as { tools: { name: string }[] };

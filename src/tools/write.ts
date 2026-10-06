@@ -2,7 +2,7 @@
  * Opt-in tools that create documents in Metakocka (METAKOCKA_WRITE).
  * draft_document builds and checks a document without saving it;
  * commit_document saves exactly that draft, after the user confirms it in
- * their client; discard_draft drops it.
+ * their client (see WriteSettings.confirm); discard_draft drops it.
  */
 import { inputRequired, inputResponse, type McpServer, type ServerContext } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
@@ -28,6 +28,22 @@ export function createWriteContext(settings: WriteSettings, options: { logToStde
 }
 
 const CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities";
+
+const NEXT_STEP: Record<WriteSettings["confirm"], string> = {
+  elicitation: "Show the summary to the user. To save it, call commit_document with this draft_id; the user confirms it in their client.",
+  client:
+    "Show the summary to the user. To save it, call commit_document with this draft_id and confirm_summary set to the summary, " +
+    "copied exactly; the user approves that call in their client.",
+  never: "Show the summary to the user and get their agreement, then call commit_document with this draft_id.",
+};
+
+const COMMIT_CONFIRMATION: Record<WriteSettings["confirm"], string> = {
+  elicitation: "The user is asked to confirm in their client first. ",
+  client:
+    "Pass confirm_summary: the draft's summary, copied exactly (it is checked). The user confirms in their client, " +
+    "either in a confirmation prompt or by approving this call. ",
+  never: "",
+};
 
 export function registerWriteTools(server: McpServer, ctx: ToolContext, write: WriteContext): void {
   const { settings, drafts, journal } = write;
@@ -95,10 +111,7 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           ),
           totals: draft.totals,
           warnings,
-          next:
-            settings.confirm === "always"
-              ? "Show the summary to the user. To save it, call commit_document with this draft_id; the user confirms it in their client."
-              : "Show the summary to the user and get their agreement, then call commit_document with this draft_id.",
+          next: NEXT_STEP[settings.confirm],
         });
       }),
   );
@@ -108,15 +121,23 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
     {
       title: "Save a drafted document",
       description:
-        "Save a draft from draft_document in Metakocka, exactly as drafted. Takes only the draft_id; to change anything, " +
-        "make a new draft. " +
-        (settings.confirm === "always" ? "The user is asked to confirm in their client first. " : "") +
+        "Save a draft from draft_document in Metakocka, exactly as drafted; to change anything, make a new draft. " +
+        COMMIT_CONFIRMATION[settings.confirm] +
         "Each draft is saved at most once. If the result says the outcome is unknown, never draft the document again: " +
         "call commit_document with the same draft_id, which first checks whether it was saved.",
-      inputSchema: z.object({ draft_id: z.string().min(1) }),
+      inputSchema: z.object({
+        draft_id: z.string().min(1),
+        confirm_summary: z
+          .string()
+          .optional()
+          .describe(
+            "The draft's `summary` from draft_document, copied exactly. Shown to the user in the client's approval prompt; " +
+              "the document is saved only if it matches the draft.",
+          ),
+      }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
-    async ({ draft_id }, extra: ServerContext) => {
+    async ({ draft_id, confirm_summary }, extra: ServerContext) => {
       const draft = drafts.get(draft_id);
       if (!draft) return error(`No draft ${draft_id}. Drafts last 15 minutes and are lost when the server restarts; make a new one with draft_document.`);
       const client = ctx.getClient();
@@ -152,23 +173,31 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
 
       if (drafts.isExpired(draft)) return error(`Draft ${draft_id} expired. Make a new one with draft_document.`);
 
-      if (settings.confirm === "always") {
-        const key = `confirm_${draft.id}`;
-        const answer = inputResponse(extra.mcpReq.inputResponses, key);
-        if (answer.kind === "missing") {
-          if (!supportsElicitation(server, extra)) {
-            return error(
-              "Nothing was saved. Saving documents requires confirming them in the client, and this client can't show " +
-                "confirmation prompts (MCP elicitation). Use a client that supports it, or create the document in Metakocka.",
-            );
+      if (settings.confirm !== "never") {
+        const elicitation = supportsElicitation(server, extra);
+        if (elicitation) {
+          const key = `confirm_${draft.id}`;
+          const answer = inputResponse(extra.mcpReq.inputResponses, key);
+          if (answer.kind === "missing") return inputRequired({ inputRequests: { [key]: inputRequired.elicit(confirmation(draft)) } });
+          if (answer.kind !== "elicit" || answer.action !== "accept" || answer.content?.confirm !== true) {
+            return ok({ status: "cancelled", message: "The user did not confirm; nothing was saved. The draft stays available until it expires." });
           }
-          return inputRequired({ inputRequests: { [key]: inputRequired.elicit(confirmation(draft)) } });
+          // The draft could have been saved by a parallel call while the user was deciding.
+          if (draft.status !== "open") return error(`Draft ${draft_id} is ${draft.status}; nothing more was saved.`);
+        } else if (settings.confirm === "elicitation") {
+          return error(
+            "Nothing was saved. Saving documents requires confirming them in the client, and this client can't show " +
+              "confirmation prompts (MCP elicitation). Use a client that supports it, or create the document in Metakocka.",
+          );
+        } else if (confirm_summary?.trim() !== draft.summary) {
+          // "client": the user approves this call in the client's own prompt, which shows confirm_summary.
+          // It must be the draft's summary, so what the user approves is exactly what is saved.
+          return error(
+            confirm_summary === undefined
+              ? "Nothing was saved. Pass confirm_summary: the draft's summary from draft_document, copied exactly, so the user sees it when approving this call."
+              : "Nothing was saved: confirm_summary does not match the draft. Copy the draft's summary from draft_document exactly.",
+          );
         }
-        if (answer.kind !== "elicit" || answer.action !== "accept" || answer.content?.confirm !== true) {
-          return ok({ status: "cancelled", message: "The user did not confirm; nothing was saved. The draft stays available until it expires." });
-        }
-        // The draft could have been saved by a parallel call while the user was deciding.
-        if (draft.status !== "open") return error(`Draft ${draft_id} is ${draft.status}; nothing more was saved.`);
       }
 
       return run(() => commitDraft(commitCtx, draft));

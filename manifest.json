@@ -197,7 +197,7 @@
     "confirm_documents": {
       "type": "boolean",
       "title": "Confirm each document",
-      "description": "Ask you to confirm every document before it is saved in Metakocka. Turn off only if you want Claude to save documents without asking.",
+      "description": "Confirm every document before it is saved in Metakocka: Claude Desktop asks you to approve the save and shows the offer's summary. Don't choose \"Always allow\" for it. Turn off only if Claude may save documents without asking.",
       "required": false,
       "default": true
     }

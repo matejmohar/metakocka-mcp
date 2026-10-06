@@ -88,15 +88,16 @@ function urlFromEnvIfValid(): string | undefined {
 }
 
 /** Replaces the "Read-only" opening of the instructions when the write tools are on. */
-export function writeInstructions(confirm: "always" | "never"): string {
+export function writeInstructions(confirm: "client" | "elicitation" | "never"): string {
   return (
     "Access to one company's Metakocka ERP (Slovenian ERP / e-commerce back office): it reads data, and it can create " +
     "offers (ponudba / predračun). To create one: find the partner (search_partners) and products (search_products) and use " +
     "their ids — never guess ids and never create partners or products; call draft_document, show its summary to the user, " +
     "then commit_document. " +
-    (confirm === "always"
-      ? "The user confirms every document in their client. "
-      : "Save a document only after the user has agreed to its summary in the conversation. ") +
+    (confirm === "never"
+      ? "Save a document only after the user has agreed to its summary in the conversation. "
+      : "The user confirms every document in their client" +
+        (confirm === "client" ? "; pass the draft's summary as confirm_summary, copied exactly. " : ". ")) +
     "If commit_document reports an unknown outcome, call it again with the same draft_id instead of drafting the document again."
   );
 }
