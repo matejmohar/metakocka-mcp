@@ -19,9 +19,10 @@ export type DraftStatus =
   | "discarded";
 
 export interface DraftLine {
-  kind: "product" | "text";
-  productId?: string;
+  productId: string;
   code?: string;
+  /** Metakocka's product number (count_code). */
+  countCode?: string;
   name: string;
   unit?: string;
   quantity: number;

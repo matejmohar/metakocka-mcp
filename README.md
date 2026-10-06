@@ -243,7 +243,7 @@ Strict rules, enforced by the server rather than left to the assistant:
   without the secret key. Each offer also carries `metakocka-mcp <draft id>` in Metakocka's change log.
 
 Not supported yet: foreign partners, partners with category discounts, currencies other than EUR, and lines that aren't
-products (except description-only lines). Nothing can be changed or deleted.
+products (Metakocka's API has no description-only lines). Nothing can be changed or deleted.
 
 In HTTP mode, writing also requires `METAKOCKA_HTTP_TOKEN`; drafts are kept per company and key.
 

@@ -120,10 +120,6 @@ export function verifyStored(draft: Draft, doc: MkRecord): string[] {
     const s = stored[i];
     if (!s) return;
     const n = i + 1;
-    if (line.kind === "text") {
-      if (str(s.mk_id) || str(s.code)) problems.push(`line ${n} (description) was linked to product ${str(s.code) ?? str(s.mk_id)}`);
-      return;
-    }
     if (str(s.mk_id) && str(s.mk_id) !== line.productId) problems.push(`line ${n} has product ${str(s.code) ?? str(s.mk_id)}, not ${line.code ?? line.productId}`);
     if (!near(num(s.amount), line.quantity, 1e-6)) problems.push(`line ${n} quantity ${str(s.amount)}, not ${line.quantity}`);
     if (!near(num(s.price), line.price, 1e-4)) problems.push(`line ${n} price ${str(s.price)}, not ${line.price}`);

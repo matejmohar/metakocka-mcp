@@ -212,6 +212,33 @@ describe("MCP server", () => {
     });
   });
 
+  it("search_documents filters offers by date itself: Metakocka rejects doc_date_from for them", async () => {
+    // 150 offers, one a day from 1 May; the server pages through them without a date filter.
+    const offers = Array.from({ length: 150 }, (_, i) => {
+      const day = new Date(Date.UTC(2026, 4, 1 + i)).toISOString().slice(0, 10);
+      return invoice({ mk_id: `O${i}`, doc_type: "sales_offer", count_code: `${i + 1}/2026`, doc_date: `${day}+02:00` });
+    });
+    const { client, calls } = await setup({
+      search: (body) => {
+        if (filterValue(body, "doc_date_from") || filterValue(body, "doc_date_to")) {
+          return { opr_code: "1", opr_desc: "Internet error - cannot get beQueryParam for : doc_date_from" };
+        }
+        const offset = Number(body.offset);
+        return { opr_code: "0", result_all_records: String(offers.length), result: offers.slice(offset, offset + Number(body.limit)) };
+      },
+    });
+    const result = await client.callTool({
+      name: "search_documents",
+      arguments: { doc_type: "sales_offer", date_from: "2026-08-01", date_to: "2026-08-31", limit: 5, offset: 2 },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(calls).toHaveLength(2);
+    expect(calls.map((c) => c.body.offset)).toEqual([0, 100]);
+    const data = json(result);
+    expect(data).toMatchObject({ total_matching: 31, returned: 5, next_offset: 7 });
+    expect(data.documents.map((d: { date: string }) => d.date)).toEqual(["2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07"]);
+  });
+
   it("search_documents treats 'No complaints found' as an empty result", async () => {
     const { client } = await setup({ search: () => ({ opr_code: "6", opr_desc: "No complaints found" }) });
     const result = await client.callTool({ name: "search_documents", arguments: { doc_type: "complaint" } });

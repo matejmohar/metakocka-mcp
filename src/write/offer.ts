@@ -18,8 +18,6 @@ export interface OfferLineInput {
   product_id?: string;
   /** Exact product code (šifra), as an alternative to product_id. */
   code?: string;
-  /** A description-only line (no product, no amount, no price). */
-  text?: string;
   quantity?: number;
   price?: number;
   discount_percent?: number;
@@ -61,16 +59,8 @@ export async function buildOfferDraft(ctx: BuildContext, input: OfferInput): Pro
   const address = resolveAddress(partner, input.address_id);
 
   const catalog = await loadCatalog(ctx.client, ctx.cache, ctx.today);
-  const productLines = input.lines.filter((l) => l.text === undefined);
-  if (!productLines.length) throw new DraftError("An offer needs at least one product line.");
-
-  const lines: DraftLine[] = [];
-  for (const [i, line] of input.lines.entries()) {
-    lines.push(line.text !== undefined ? textLine(line, i) : productLine(catalog, line, i));
-  }
-  // A description line carries no amount; give it the tax code the product lines use so Metakocka has one.
-  const firstTax = lines.find((l) => l.kind === "product")!;
-  for (const l of lines) if (l.kind === "text") Object.assign(l, { taxCode: firstTax.taxCode, taxRatePercent: firstTax.taxRatePercent });
+  if (!input.lines.length) throw new DraftError("An offer needs at least one product line.");
+  const lines = input.lines.map((line, i) => productLine(catalog, line, i));
 
   const totals = {
     net: round2(lines.reduce((s, l) => s + l.net, 0)),
@@ -88,11 +78,16 @@ export async function buildOfferDraft(ctx: BuildContext, input: OfferInput): Pro
     valid_days: String(validDays),
     ...(input.title ? { title: input.title } : {}),
     ...(input.note ? { notes: input.note } : {}),
-    product_list: lines.map((l) =>
-      l.kind === "product"
-        ? { mk_id: l.productId, amount: String(l.quantity), price: String(l.price), discount: String(l.discountPercent), tax: l.taxCode }
-        : { name: l.name, amount: "0", price: "0", tax: l.taxCode },
-    ),
+    // put_document finds products by code / count_code; mk_id alone leaves it "not found".
+    product_list: lines.map((l) => ({
+      mk_id: l.productId,
+      ...(l.code ? { code: l.code } : {}),
+      ...(l.countCode ? { count_code: l.countCode } : {}),
+      amount: String(l.quantity),
+      price: String(l.price),
+      discount: String(l.discountPercent),
+      tax: l.taxCode,
+    })),
   };
 
   const same = ctx.drafts
@@ -114,7 +109,7 @@ export async function buildOfferDraft(ctx: BuildContext, input: OfferInput): Pro
   });
   // The id goes into Metakocka's change log, so the document can be traced back to this draft.
   payload.document_change_log_notes = `${CHANGE_LOG_PREFIX} ${draft.id}`;
-  draft.summary = summarize(draft, validDays, ctx.installation);
+  draft.summary = summarize(draft, { title: input.title, note: input.note, validDays }, ctx.installation);
   return { draft, warnings };
 }
 
@@ -181,7 +176,10 @@ function productLine(catalog: Map<string, CatalogProduct>, line: OfferLineInput,
     }
     product = matches[0]!;
   } else {
-    throw new DraftError(`Line ${n}: give product_id (or code) for a product line, or text for a description line.`);
+    throw new DraftError(
+      `Line ${n}: give product_id (or code). Every line must be a product: Metakocka's API has no description-only lines. ` +
+        "Suggest to the user to leave this line out; don't move its text into the title or note unless they ask for it.",
+    );
   }
 
   if (!product.active) throw new DraftError(`Line ${n}: ${product.name} is not active in Metakocka.`);
@@ -198,9 +196,9 @@ function productLine(catalog: Map<string, CatalogProduct>, line: OfferLineInput,
   const net = round2(quantity * price * (1 - discountPercent / 100));
   const tax = round2((net * product.taxRatePercent) / 100);
   return {
-    kind: "product",
     productId: product.id,
     code: product.code,
+    countCode: product.productId,
     name: product.name,
     unit: product.unit,
     quantity,
@@ -214,30 +212,47 @@ function productLine(catalog: Map<string, CatalogProduct>, line: OfferLineInput,
   };
 }
 
-function textLine(line: OfferLineInput, i: number): DraftLine {
-  const text = line.text?.trim();
-  if (!text) throw new DraftError(`Line ${i + 1}: a description line needs text.`);
-  if (line.product_id || line.code || line.price !== undefined || line.quantity !== undefined) {
-    throw new DraftError(`Line ${i + 1}: a description line has only text, no product, quantity or price.`);
-  }
-  return { kind: "text", name: text, quantity: 0, price: 0, discountPercent: 0, taxCode: "", taxRatePercent: 0, net: 0, tax: 0, gross: 0 };
-}
 
 const money = (n: number, language: "sl" | "en") =>
   `${n.toLocaleString(language === "sl" ? "sl-SI" : "en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
 
-/** What the user confirms: short, in their language, with everything that identifies the document. */
-function summarize(d: Draft, validDays: number, installation: string | undefined): string {
+/**
+ * What the user confirms, in their language: everything that will be saved, one fact per line.
+ * commit_document compares it ignoring line breaks and indentation (see sameSummary).
+ */
+function summarize(d: Draft, extra: { title?: string; note?: string; validDays: number }, installation: string | undefined): string {
   const sl = d.language === "sl";
-  const products = d.lines.filter((l) => l.kind === "product");
-  const lines = products
-    .map((l) => `${l.quantity} × ${l.name} à ${money(l.price, d.language)}${l.discountPercent ? ` −${l.discountPercent} %` : ""}`)
-    .join("; ");
-  const who = `${d.partner.name}${d.partner.taxId ? ` (${d.partner.taxId})` : ""}, ${d.partner.address}`;
-  const where = installation ? ` Metakocka: ${installation}.` : "";
-  return sl
-    ? `Ustvari PONUDBO za ${who}. Postavke (${products.length}): ${lines}. Skupaj ${money(d.totals.gross, "sl")} z DDV ` +
-        `(osnova ${money(d.totals.net, "sl")}, DDV ${money(d.totals.tax, "sl")}). Datum ${d.docDate}, velja ${validDays} dni.${where}`
-    : `Create an OFFER for ${who}. ${products.length} line(s): ${lines}. Total ${money(d.totals.gross, "en")} incl. VAT ` +
-        `(net ${money(d.totals.net, "en")}, VAT ${money(d.totals.tax, "en")}). Dated ${d.docDate}, valid ${validDays} days.${where}`;
+  const m = (n: number) => money(n, d.language);
+  const t = sl
+    ? { head: "Ustvari PONUDBO za", title: "Naziv", note: "Opomba", lines: "Postavke", net: "Osnova", tax: "DDV", gross: "Skupaj z DDV", date: "Datum", valid: `velja ${extra.validDays} dni` }
+    : { head: "Create an OFFER for", title: "Title", note: "Note", lines: "Lines", net: "Net", tax: "VAT", gross: "Total incl. VAT", date: "Dated", valid: `valid ${extra.validDays} days` };
+  const lines = d.lines.map(
+    (l, i) => `  ${i + 1}. ${l.quantity} × ${l.name} à ${m(l.price)}${l.discountPercent ? ` −${l.discountPercent} %` : ""} = ${m(l.net)}`,
+  );
+  return [
+    `${t.head} ${d.partner.name}${d.partner.taxId ? ` (${d.partner.taxId})` : ""}`,
+    d.partner.address,
+    ...(extra.title ? [`${t.title}: ${extra.title}`] : []),
+    ...(extra.note ? [`${t.note}: ${extra.note.replace(/\s+/g, " ").trim()}`] : []),
+    "",
+    `${t.lines}:`,
+    ...lines,
+    "",
+    `${t.net}: ${m(d.totals.net)}`,
+    `${t.tax}: ${m(d.totals.tax)}`,
+    `${t.gross}: ${m(d.totals.gross)}`,
+    "",
+    [`${t.date} ${d.docDate}`, t.valid, ...(installation ? [`Metakocka: ${installation}`] : [])].join(" · "),
+  ].join("\n");
+}
+
+/** The summary as the client passed it back, compared without line endings, indentation or blank lines. */
+export function sameSummary(given: string, summary: string): boolean {
+  const norm = (s: string) =>
+    s
+      .split(/\r?\n/)
+      .map((l) => l.replace(/\s+/g, " ").trim())
+      .filter(Boolean)
+      .join("\n");
+  return norm(given) === norm(summary);
 }

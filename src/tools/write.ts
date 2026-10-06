@@ -11,7 +11,7 @@ import { describeInstallation } from "../installation.js";
 import { commitDraft, resolveUnknown } from "../write/commit.js";
 import { DraftStore, type Draft } from "../write/drafts.js";
 import { createJournal, type Journal } from "../write/journal.js";
-import { buildOfferDraft } from "../write/offer.js";
+import { buildOfferDraft, sameSummary } from "../write/offer.js";
 import type { WriteSettings } from "../write/settings.js";
 import { compact } from "../util.js";
 import { run, type ToolContext } from "./shared.js";
@@ -70,7 +70,6 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
             z.object({
               product_id: z.string().optional().describe("Product's Metakocka id (the `id` from search_products)."),
               code: z.string().optional().describe("Exact product code (šifra), instead of product_id."),
-              text: z.string().max(500).optional().describe("A description-only line (opisna vrstica): no product, quantity or price."),
               quantity: z.number().positive().max(1_000_000).optional(),
               price: z.number().min(0).max(10_000_000).optional().describe("Net unit price in EUR; default: the product's price list."),
               discount_percent: z.number().min(0).max(100).optional(),
@@ -104,11 +103,7 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           expires_at: new Date(draft.expiresAt).toISOString(),
           summary: draft.summary,
           partner: draft.partner,
-          lines: draft.lines.map((l) =>
-            l.kind === "text"
-              ? { text: l.name }
-              : { product_id: l.productId, code: l.code, name: l.name, quantity: l.quantity, unit: l.unit, price: l.price, discount_percent: l.discountPercent, vat_percent: l.taxRatePercent, net: l.net, total: l.gross },
-          ),
+          lines: draft.lines.map((l) => ({ product_id: l.productId, code: l.code, name: l.name, quantity: l.quantity, unit: l.unit, price: l.price, discount_percent: l.discountPercent, vat_percent: l.taxRatePercent, net: l.net, total: l.gross })),
           totals: draft.totals,
           warnings,
           next: NEXT_STEP[settings.confirm],
@@ -189,7 +184,7 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
             "Nothing was saved. Saving documents requires confirming them in the client, and this client can't show " +
               "confirmation prompts (MCP elicitation). Use a client that supports it, or create the document in Metakocka.",
           );
-        } else if (confirm_summary?.trim() !== draft.summary) {
+        } else if (confirm_summary === undefined || !sameSummary(confirm_summary, draft.summary)) {
           // "client": the user approves this call in the client's own prompt, which shows confirm_summary.
           // It must be the draft's summary, so what the user approves is exactly what is saved.
           return error(

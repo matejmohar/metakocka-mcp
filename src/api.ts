@@ -4,7 +4,7 @@
  */
 import { MetakockaError, type MetakockaClient } from "./client.js";
 import type { DocType } from "./doc-types.js";
-import { toMkDate } from "./dates.js";
+import { fromMkDate, toMkDate } from "./dates.js";
 import { asArray, num, str } from "./util.js";
 
 export type MkRecord = Record<string, unknown>;
@@ -36,6 +36,14 @@ export interface SearchPage {
 }
 
 export const SEARCH_PAGE_MAX = 100;
+
+/**
+ * Document types whose /search rejects doc_date_from / doc_date_to (offers: "cannot get beQueryParam";
+ * complaints want last_change_from/to instead). Their dates are filtered here, over all matching documents.
+ */
+const NO_DATE_FILTER: ReadonlySet<DocType> = new Set<DocType>(["sales_offer", "complaint"]);
+/** How many documents of such a type are read to filter them by date. */
+const LOCAL_DATE_FILTER_MAX = 5000;
 export const PRODUCT_PAGE_MAX = 1000;
 
 export function buildSearchFilters(search: DocumentSearch): AdvancedFilter[] {
@@ -48,6 +56,38 @@ export function buildSearchFilters(search: DocumentSearch): AdvancedFilter[] {
 
 /** One page of full documents from /search. */
 export async function searchDocuments(client: MetakockaClient, search: DocumentSearch): Promise<SearchPage> {
+  if (!filtersDatesHere(search)) return searchPage(client, search);
+  const inRange = await searchFilteringDates(client, search);
+  const offset = Math.max(search.offset ?? 0, 0);
+  const limit = Math.min(Math.max(search.limit ?? 25, 1), SEARCH_PAGE_MAX);
+  return { totalRecords: inRange.length, offset, documents: inRange.slice(offset, offset + limit) };
+}
+
+const filtersDatesHere = (search: Pick<DocumentSearch, "docType" | "dateFrom" | "dateTo">) =>
+  NO_DATE_FILTER.has(search.docType) && !!(search.dateFrom || search.dateTo);
+
+/** Every document of a type Metakocka can't filter by date, read without the dates and filtered here. */
+async function searchFilteringDates(client: MetakockaClient, search: Omit<DocumentSearch, "limit" | "offset">): Promise<MkRecord[]> {
+  const { dateFrom, dateTo, ...rest } = search;
+  const all: MkRecord[] = [];
+  for (let at = 0; ; at += SEARCH_PAGE_MAX) {
+    const page = await searchPage(client, { ...rest, limit: SEARCH_PAGE_MAX, offset: at });
+    all.push(...page.documents);
+    if (page.documents.length < SEARCH_PAGE_MAX || (page.totalRecords !== undefined && all.length >= page.totalRecords)) break;
+    if (all.length >= LOCAL_DATE_FILTER_MAX) {
+      throw new MetakockaError(
+        `Metakocka can't filter ${search.docType} by date, and there are more than ${LOCAL_DATE_FILTER_MAX} of them to filter here. ` +
+          "Narrow the search (e.g. by partner or text).",
+      );
+    }
+  }
+  return all.filter((d) => {
+    const date = fromMkDate(d.doc_date);
+    return !!date && (!dateFrom || date >= dateFrom) && (!dateTo || date <= dateTo);
+  });
+}
+
+async function searchPage(client: MetakockaClient, search: DocumentSearch): Promise<SearchPage> {
   const limit = Math.min(Math.max(search.limit ?? 25, 1), SEARCH_PAGE_MAX);
   const offset = Math.max(search.offset ?? 0, 0);
   const filters = buildSearchFilters(search);
@@ -85,6 +125,12 @@ export async function searchAllDocuments(
   maxDocuments: number,
   onPage?: OnPage,
 ): Promise<{ documents: MkRecord[]; totalRecords: number | undefined; truncated: boolean }> {
+  if (filtersDatesHere(search)) {
+    const inRange = await searchFilteringDates(client, search);
+    const documents = inRange.slice(0, maxDocuments);
+    onPage?.({ docType: search.docType, fetched: documents.length, total: inRange.length });
+    return { documents, totalRecords: inRange.length, truncated: documents.length < inRange.length };
+  }
   const documents: MkRecord[] = [];
   let totalRecords: number | undefined;
   let offset = 0;

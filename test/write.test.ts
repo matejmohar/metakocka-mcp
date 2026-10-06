@@ -198,9 +198,29 @@ describe("draft_document", () => {
       expect.objectContaining({ product_id: "P2", name: "Dokumentacija", quantity: 1, price: 20, net: 20, total: 24.4 }),
     ]);
     expect(body.totals).toEqual({ net: 125, tax: 27.5, gross: 152.5, currency: "EUR" });
-    expect(body.summary).toMatch(/PONUDBO za ACME d\.o\.o\. \(SI12345678\), Glavna 1, 1000 Ljubljana/);
-    expect(body.summary).toMatch(/152,50 €/);
+    expect(body.summary).toBe(
+      [
+        "Ustvari PONUDBO za ACME d.o.o. (SI12345678)",
+        "Glavna 1, 1000 Ljubljana, Slovenia",
+        "",
+        "Postavke:",
+        "  1. 3 × Svetovanje à 35,00 € = 105,00 €",
+        "  2. 1 × Dokumentacija à 20,00 € = 20,00 €",
+        "",
+        "Osnova: 125,00 €",
+        "DDV: 27,50 €",
+        "Skupaj z DDV: 152,50 €",
+        "",
+        "Datum 2026-10-05 · velja 30 dni",
+      ].join("\n"),
+    );
     expect(fake.puts()).toHaveLength(0);
+  });
+
+  it("shows the title and note in the summary", async () => {
+    const { client } = await connect(metakocka());
+    const { body } = await draft(client, { ...OFFER, title: "Projekt", note: "Hvala\nza zaupanje" });
+    expect(body.summary).toMatch(/\(SI12345678\)\nGlavna 1, 1000 Ljubljana, Slovenia\nNaziv: Projekt\nOpomba: Hvala za zaupanje\n\nPostavke:/);
   });
 
   it("refuses anything that isn't an existing, unambiguous record", async () => {
@@ -231,8 +251,8 @@ describe("draft_document", () => {
     expect(await err({ lines: [{ product_id: "P4", quantity: 1 }] })).toMatch(/not marked for sale/);
     expect(await err({ lines: [{ product_id: "P5", quantity: 1, price: 10 }] })).toMatch(/no sales price in EUR/);
     expect(await err({ lines: [{ product_id: "P1" }] })).toMatch(/quantity/);
-    expect(await err({ lines: [{ text: "Uvod" }] })).toMatch(/at least one product line/);
-    expect(await err({ lines: [{ product_id: "P1", quantity: 1 }, { text: "Uvod", price: 5 }] })).toMatch(/only text/);
+    // Metakocka's put_document has no description-only lines: every row is looked up (or created) as a product.
+    expect(await err({ lines: [{ product_id: "P1", quantity: 1 }, { text: "Uvod" }] })).toMatch(/Line 2: .*no description-only lines/);
     expect(fake.puts()).toHaveLength(0);
   });
 
@@ -271,7 +291,7 @@ describe("commit_document", () => {
   it("asks the user, then sends exactly the drafted request once, and checks what was stored", async () => {
     const fake = metakocka();
     const { client, prompts } = await connect(fake);
-    const { body: d } = await draft(client);
+    const { body: d } = await draft(client, { ...OFFER, title: "Projekt", note: "Hvala" });
     const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: d.draft_id } }));
 
     expect(prompts).toHaveLength(1);
@@ -289,9 +309,11 @@ describe("commit_document", () => {
       partner: { mk_id: "400068941553", mk_address_id: "400079138037" },
       currency_code: "EUR",
       valid_days: "30",
+      title: "Projekt",
+      notes: "Hvala",
       product_list: [
-        { mk_id: "P1", amount: "3", price: "35", discount: "0", tax: "EX4" },
-        { mk_id: "P2", amount: "1", price: "20", discount: "0", tax: "EX4" },
+        { mk_id: "P1", code: "SVC-H", count_code: "1", amount: "3", price: "35", discount: "0", tax: "EX4" },
+        { mk_id: "P2", code: "SVC-D", count_code: "2", amount: "1", price: "20", discount: "0", tax: "EX4" },
       ],
       document_change_log_notes: `metakocka-mcp ${d.draft_id}`,
     });
@@ -300,21 +322,6 @@ describe("commit_document", () => {
     const again = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: d.draft_id } }));
     expect(again).toMatchObject({ status: "already_created", number: "3/2026" });
     expect(fake.puts()).toHaveLength(1);
-  });
-
-  it("description lines are sent as text only, without a product", async () => {
-    const fake = metakocka();
-    const { client } = await connect(fake);
-    const { body: d } = await draft(client, { ...OFFER, lines: [{ text: "Faza 1" }, { product_id: "P1", quantity: 1 }], title: "Projekt", note: "Hvala" });
-    const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: d.draft_id } }));
-    expect(r.status).toBe("created");
-    expect(r.warnings).toEqual([]);
-    const sent = fake.puts()[0]!.body;
-    expect(sent.product_list).toEqual([
-      { name: "Faza 1", amount: "0", price: "0", tax: "EX4" },
-      { mk_id: "P1", amount: "1", price: "35", discount: "0", tax: "EX4" },
-    ]);
-    expect(sent).toMatchObject({ title: "Projekt", notes: "Hvala" });
   });
 
   it("saves nothing when the user declines, and the draft can still be confirmed later", async () => {
@@ -358,7 +365,9 @@ describe("commit_document", () => {
     expect(parse(other)).toMatch(/does not match the draft/);
     expect(fake.puts()).toHaveLength(0);
 
-    expect(parse(await commit({ confirm_summary: `  ${d.summary}\n` }))).toMatchObject({ status: "created", number: "3/2026" });
+    // Line endings, indentation and blank lines may change on the way through the client.
+    const retyped = d.summary.replace(/\n+/g, "\r\n").replace(/^ +/gm, "");
+    expect(parse(await commit({ confirm_summary: `  ${retyped}\n` }))).toMatchObject({ status: "created", number: "3/2026" });
     expect(fake.puts()).toHaveLength(1);
     expect(prompts).toHaveLength(0);
   });
@@ -457,12 +466,14 @@ describe("commit_document", () => {
     const search = fake.calls.find((c) => c.endpoint === "search")!.body;
     expect(search).toMatchObject({ doc_type: "sales_offer" });
     expect(filterValue(search, "partner_mk_id")).toBe("400068941553");
-    expect(filterValue(search, "doc_date_from")).toBe("05.10.2026");
+    // Metakocka can't filter offers by date ("cannot get beQueryParam"); the date is checked on our side.
+    expect(filterValue(search, "doc_date_from")).toBeUndefined();
     expect(fake.puts()).toHaveLength(1);
 
     // Fails again; this time the document turns out to exist.
     expect(await commit()).toMatchObject({ status: "unknown" });
-    found = [{ mk_id: "OFFER1", count_code: "3/2026", sum_all: "152.50", product_list: [{}, {}] }];
+    const offer = { count_code: "3/2026", sum_all: "152.50", product_list: [{}, {}] };
+    found = [{ ...offer, mk_id: "OLD", doc_date: "2026-10-04+02:00" }, { ...offer, mk_id: "OFFER1", doc_date: "2026-10-05+02:00" }];
     fail = false;
     const resolved = await commit();
     expect(resolved).toMatchObject({ status: "created", number: "3/2026", warnings: [expect.stringMatching(/found afterwards/)] });
@@ -471,7 +482,7 @@ describe("commit_document", () => {
   });
 
   it("several matching documents after a lost answer: the user decides", async () => {
-    const twin = { count_code: "3/2026", sum_all: "152.5", product_list: [{}, {}] };
+    const twin = { count_code: "3/2026", doc_date: "2026-10-05+02:00", sum_all: "152.5", product_list: [{}, {}] };
     const fake = metakocka({
       put: () => {
         throw new TypeError("fetch failed");
