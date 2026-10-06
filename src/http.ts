@@ -19,6 +19,8 @@ import { MetakockaClient } from "./client.js";
 import { baseUrlFromEnv, cacheTtlMs, ConfigError, envValue, loadConfig, timeoutMsFromEnv } from "./config.js";
 import { describeInstallation } from "./installation.js";
 import { createServer } from "./server.js";
+import { createWriteContext } from "./tools/write.js";
+import { writeSettingsFromEnv } from "./write/settings.js";
 import { VERSION } from "./version.js";
 
 export const COMPANY_HEADER = "x-metakocka-company-id";
@@ -53,6 +55,10 @@ export function createHttpApp({ env = process.env, fetch: fetchImpl, idleMs = 30
   const cacheMs = cacheTtlMs(env, { strict: true });
   const token = envValue(env, "METAKOCKA_HTTP_TOKEN");
   const allowedHosts = allowedHostnames(env, host);
+  const writeSettings = writeSettingsFromEnv(env); // throws ConfigError at startup for a bad value
+  if (writeSettings && token === undefined) {
+    throw new ConfigError("METAKOCKA_WRITE needs METAKOCKA_HTTP_TOKEN in HTTP mode: creating documents is never open to unauthenticated clients.");
+  }
   const tenants = new Map<string, Tenant>();
 
   function tenantFor(companyId: string, secretKey: string): Tenant {
@@ -61,8 +67,10 @@ export function createHttpApp({ env = process.env, fetch: fetchImpl, idleMs = 30
     if (!tenant) {
       const client = new MetakockaClient({ companyId, secretKey, baseUrl, timeoutMs, fetch: fetchImpl, userAgent: `metakocka-mcp/${VERSION} (http)` });
       const cache = new TtlCache(cacheMs);
+      // Per company and key, like the cache: one tenant can never see or commit another's drafts.
+      const write = writeSettings ? createWriteContext(writeSettings, { logToStderr: true }) : undefined;
       tenant = {
-        handler: createMcpHandler(() => createServer({ getClient: () => client, cache, baseUrl, pdfDelivery: "embedded" })),
+        handler: createMcpHandler(() => createServer({ getClient: () => client, cache, baseUrl, pdfDelivery: "embedded", write })),
         lastUsed: 0,
       };
       tenants.set(key, tenant);

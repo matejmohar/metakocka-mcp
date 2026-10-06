@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TtlCache } from "../src/cache.js";
 import { createServer, type CreateServerOptions } from "../src/server.js";
+import { DraftStore } from "../src/write/drafts.js";
 import { fakeMetakocka, filterValue, invoice, type Handler } from "./fake-metakocka.js";
 
 const NOW = new Date("2026-10-05T10:00:00Z");
@@ -123,8 +124,9 @@ describe("MCP server", () => {
     expect(main.getInstructions()).not.toContain("installation at");
   });
 
-  it("lists the same tools as the .mcpb manifest", async () => {
-    const { client } = await setup({});
+  it("lists the same tools as the .mcpb manifest (with creating offers turned on)", async () => {
+    const write = { settings: { docTypes: ["sales_offer" as const], confirm: "client" as const, timeoutMs: 1000 }, drafts: new DraftStore(), journal: async () => {} };
+    const { client } = await setup({}, { write });
     const { tools } = await client.listTools();
     const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8")) as { tools: { name: string }[] };
     expect(manifest.tools.map((t) => t.name).sort()).toEqual(tools.map((t) => t.name).sort());
@@ -208,6 +210,33 @@ describe("MCP server", () => {
       due_date: "2026-08-25",
       line_count: 1,
     });
+  });
+
+  it("search_documents filters offers by date itself: Metakocka rejects doc_date_from for them", async () => {
+    // 150 offers, one a day from 1 May; the server pages through them without a date filter.
+    const offers = Array.from({ length: 150 }, (_, i) => {
+      const day = new Date(Date.UTC(2026, 4, 1 + i)).toISOString().slice(0, 10);
+      return invoice({ mk_id: `O${i}`, doc_type: "sales_offer", count_code: `${i + 1}/2026`, doc_date: `${day}+02:00` });
+    });
+    const { client, calls } = await setup({
+      search: (body) => {
+        if (filterValue(body, "doc_date_from") || filterValue(body, "doc_date_to")) {
+          return { opr_code: "1", opr_desc: "Internet error - cannot get beQueryParam for : doc_date_from" };
+        }
+        const offset = Number(body.offset);
+        return { opr_code: "0", result_all_records: String(offers.length), result: offers.slice(offset, offset + Number(body.limit)) };
+      },
+    });
+    const result = await client.callTool({
+      name: "search_documents",
+      arguments: { doc_type: "sales_offer", date_from: "2026-08-01", date_to: "2026-08-31", limit: 5, offset: 2 },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(calls).toHaveLength(2);
+    expect(calls.map((c) => c.body.offset)).toEqual([0, 100]);
+    const data = json(result);
+    expect(data).toMatchObject({ total_matching: 31, returned: 5, next_offset: 7 });
+    expect(data.documents.map((d: { date: string }) => d.date)).toEqual(["2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07"]);
   });
 
   it("search_documents treats 'No complaints found' as an empty result", async () => {

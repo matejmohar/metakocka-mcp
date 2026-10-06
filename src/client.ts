@@ -34,6 +34,8 @@ export interface CallOptions {
    * in a later version) must pass false so a timeout never creates duplicates.
    */
   idempotent?: boolean;
+  /** Overrides the client's timeout for this call (writes can take much longer than reads). */
+  timeoutMs?: number;
 }
 
 export class MetakockaError extends Error {
@@ -93,7 +95,9 @@ export class MetakockaClient {
    * `call("json/product_list", {...})`. Credentials are added automatically.
    */
   call<T = Json>(endpoint: string, params: Json = {}, options: CallOptions = {}): Promise<T> {
-    return this.enqueue(() => this.withRetries(() => this.callOnce<T>(endpoint, params), options.idempotent ?? true));
+    return this.enqueue(() =>
+      this.withRetries(() => this.callOnce<T>(endpoint, params, options.timeoutMs), options.idempotent ?? true),
+    );
   }
 
   /**
@@ -126,8 +130,8 @@ export class MetakockaClient {
     throw lastError;
   }
 
-  private async callOnce<T>(endpoint: string, params: Json): Promise<T> {
-    const response = await this.post(endpoint, params);
+  private async callOnce<T>(endpoint: string, params: Json, timeoutMs?: number): Promise<T> {
+    const response = await this.post(endpoint, params, timeoutMs);
     return this.parseJson<T>(endpoint, response, await response.text());
   }
 
@@ -142,7 +146,7 @@ export class MetakockaClient {
     return { contentType, bytes: new Uint8Array(await response.arrayBuffer()) };
   }
 
-  private async post(endpoint: string, params: Json): Promise<Response> {
+  private async post(endpoint: string, params: Json, timeoutMs = this.timeoutMs): Promise<Response> {
     const url = `${this.baseUrl}/${endpoint.replace(/^\/+/, "")}`;
     const body = JSON.stringify({ ...params, company_id: this.companyId, secret_key: this.secretKey });
 
@@ -156,11 +160,11 @@ export class MetakockaClient {
           "User-Agent": this.userAgent,
         },
         body,
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
       if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
-        throw new NetworkError(`Could not reach Metakocka (${endpoint}): timed out after ${Math.round(this.timeoutMs / 1000)} s`, "TIMEOUT");
+        throw new NetworkError(`Could not reach Metakocka (${endpoint}): timed out after ${Math.round(timeoutMs / 1000)} s`, "TIMEOUT");
       }
       const code = networkErrorCode(error);
       const reason = (code && NETWORK_REASONS[code]?.(this.host)) ?? this.redact(errorText(error));

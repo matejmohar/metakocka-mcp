@@ -3,8 +3,8 @@
   "name": "metakocka-mcp",
   "display_name": "Metakocka",
   "version": "0.4.0",
-  "description": "Ask Claude about your Metakocka ERP: documents, invoices, stock, products and partners. Read-only. Works in Slovenian and English (slovenščina in angleščina).",
-  "long_description": "Connects Claude to your Metakocka ERP so you can ask questions about your business in plain language: who owes you money and how overdue they are, top products last month, stock in a warehouse, or the full detail of a sales order. This version is read-only: it cannot create, change or delete anything in Metakocka. Requests go directly from your computer to Metakocka's API. This is an independent community project, not made or endorsed by Metakocka d.o.o.",
+  "description": "Ask Claude about your Metakocka ERP: documents, invoices, stock, products and partners. Read-only by default; creating offers can be turned on. Works in Slovenian and English (slovenščina in angleščina).",
+  "long_description": "Connects Claude to your Metakocka ERP so you can ask questions about your business in plain language: who owes you money and how overdue they are, top products last month, stock in a warehouse, or the full detail of a sales order. By default it is read-only. Creating offers (ponudbe / predračuni) can be turned on in the settings: every offer is linked to partners and products that already exist in Metakocka, and you confirm each one before it is saved. It never changes or deletes anything. Requests go directly from your computer to Metakocka's API. This is an independent community project, not made or endorsed by Metakocka d.o.o.",
   "author": {
     "name": "Matej Mohar",
     "email": "matej@mohar.dev",
@@ -39,7 +39,9 @@
         "NODE_EXTRA_CA_CERTS": "${user_config.ca_cert}",
         "METAKOCKA_TIMEOUT_SECONDS": "${user_config.timeout_seconds}",
         "METAKOCKA_CACHE_SECONDS": "${user_config.cache_seconds}",
-        "METAKOCKA_PDF_DIR": "${user_config.pdf_dir}"
+        "METAKOCKA_PDF_DIR": "${user_config.pdf_dir}",
+        "METAKOCKA_WRITE_OFFERS": "${user_config.allow_offers}",
+        "METAKOCKA_WRITE_CONFIRM": "${user_config.confirm_documents}"
       }
     }
   },
@@ -119,6 +121,18 @@
     {
       "name": "get_bank_statements",
       "description": "Money in and out per bank account, with transactions."
+    },
+    {
+      "name": "draft_document",
+      "description": "Prepare an offer from existing partners and products, without saving it (only when creating offers is on)."
+    },
+    {
+      "name": "commit_document",
+      "description": "Save a prepared offer in Metakocka after you confirm it (only when creating offers is on)."
+    },
+    {
+      "name": "discard_draft",
+      "description": "Drop a prepared offer (only when creating offers is on)."
     }
   ],
   "tools_generated": false,
@@ -172,6 +186,20 @@
       "title": "PDF folder (optional)",
       "description": "Where invoice PDFs are saved. Default: Downloads/Metakocka.",
       "required": false
+    },
+    "allow_offers": {
+      "type": "boolean",
+      "title": "Allow creating offers",
+      "description": "Let Claude create offers (ponudbe / predračuni) in Metakocka, linked only to partners and products that already exist. Off by default.",
+      "required": false,
+      "default": false
+    },
+    "confirm_documents": {
+      "type": "boolean",
+      "title": "Confirm each document",
+      "description": "Confirm every document before it is saved in Metakocka: Claude Desktop asks you to approve the save and shows the offer's summary. Don't choose \"Always allow\" for it. Turn off only if Claude may save documents without asking.",
+      "required": false,
+      "default": true
     }
   },
   "compatibility": {
