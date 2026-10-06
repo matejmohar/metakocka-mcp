@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "metakocka-mcp",
   "display_name": "Metakocka",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Ask Claude about your Metakocka ERP: documents, invoices, stock, products and partners. Read-only by default; creating offers, invoices, received invoices, partners and products can be turned on. Works in Slovenian and English (slovenščina in angleščina).",
   "long_description": "Connects Claude to your Metakocka ERP so you can ask questions about your business in plain language: who owes you money and how overdue they are, top products last month, stock in a warehouse, or the full detail of a sales order. By default it is read-only. Creating offers (ponudbe / predračuni), invoices (računi) and received invoices (prejeti računi, copied from the supplier's PDF) can be turned on in the settings, and so can adding new partners and products: documents are linked to partners and products that exist in Metakocka (or that you have just added), and you confirm each one before it is saved. Invoices are saved not issued, for you to check and issue in Metakocka. It never changes or deletes anything. Requests go directly from your computer to Metakocka's API. This is an independent community project, not made or endorsed by Metakocka d.o.o.",
   "author": {
