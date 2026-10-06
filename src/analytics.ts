@@ -176,3 +176,146 @@ export function salesSummary(docs: MkRecord[], groupBy: SalesGroupBy, top: numbe
     ...(linesWithoutPrice ? { lines_without_net_price: linesWithoutPrice } : {}),
   };
 }
+
+type Summary = ReturnType<typeof salesSummary>;
+
+function changePercent(now: number, before: number): number | undefined {
+  return before === 0 ? undefined : round2(((now - before) / Math.abs(before)) * 100);
+}
+
+/**
+ * Compare two summaries made with the same grouping. Both must contain every
+ * group (top = Infinity) so that a group missing from one period counts as 0;
+ * `top` then limits what is shown.
+ */
+export function compareSummaries(current: Summary, previous: Summary, top: number) {
+  const groupBy = current.group_by;
+  const key = (g: SummaryGroup) => `${String(g[groupBy])}|${g.currency}`;
+
+  const currencies = new Set([...Object.keys(current.totals_by_currency), ...Object.keys(previous.totals_by_currency)]);
+  const totals: Record<string, Record<string, number | undefined>> = {};
+  for (const c of currencies) {
+    const now = current.totals_by_currency[c] ?? { documents: 0, net: 0, gross: 0 };
+    const before = previous.totals_by_currency[c] ?? { documents: 0, net: 0, gross: 0 };
+    totals[c] = {
+      documents: now.documents,
+      previous_documents: before.documents,
+      net: now.net,
+      previous_net: before.net,
+      change_net: round2(now.net - before.net),
+      change_percent: changePercent(now.net, before.net),
+      gross: now.gross,
+      previous_gross: before.gross,
+    };
+  }
+
+  // Months never match between two periods; show both series side by side instead.
+  if (groupBy === "month") {
+    return { totals_by_currency: totals, group_by: groupBy, groups: current.groups, previous_groups: previous.groups };
+  }
+
+  const prevByKey = new Map(previous.groups.map((g) => [key(g), g]));
+  const nowByKey = new Map(current.groups.map((g) => [key(g), g]));
+  const withChange = (g: SummaryGroup) => {
+    const before = prevByKey.get(key(g))?.net ?? 0;
+    return { ...g, previous_net: before, change_net: round2(g.net - before), change_percent: changePercent(g.net, before) };
+  };
+
+  const shown = current.groups.slice(0, top).map(withChange);
+  // Groups that fell the most, including ones with no sales at all this period (lost customers / products).
+  const declines = [...new Set([...prevByKey.keys(), ...nowByKey.keys()])]
+    .map((k) => {
+      const now = nowByKey.get(k);
+      const before = prevByKey.get(k);
+      const g = (now ?? before)!;
+      const net = now?.net ?? 0;
+      const prevNet = before?.net ?? 0;
+      return { [groupBy]: g[groupBy], currency: g.currency, net, previous_net: prevNet, change_net: round2(net - prevNet) };
+    })
+    .filter((g) => g.change_net < 0)
+    .sort((a, b) => a.change_net - b.change_net)
+    .slice(0, 10);
+
+  return {
+    totals_by_currency: totals,
+    group_by: groupBy,
+    groups: shown,
+    groups_not_shown: current.groups.length - shown.length,
+    biggest_declines: declines,
+    ...(current.lines_without_net_price ? { lines_without_net_price: current.lines_without_net_price } : {}),
+  };
+}
+
+const CREDIT_NOTE_TYPES = new Set(["sales_bill_credit_note", "purchase_bill_credit_note"]);
+
+export interface StatementRow {
+  date?: string;
+  number?: string;
+  type?: string;
+  due_date?: string;
+  currency: string;
+  /** Negative for credit notes. */
+  amount: number;
+  paid: number;
+  open: number;
+  days_overdue?: number;
+  running_open_balance: number;
+}
+
+/**
+ * A partner's account for a period: every invoice and credit note in date
+ * order, what is still open on each, and a running balance of open amounts
+ * that starts from what was already open on older documents.
+ * Metakocka's search results carry the amount paid per document but not the
+ * payment dates, so payments are shown per document rather than as their own rows.
+ */
+export function partnerStatement(docs: MkRecord[], olderOpenDocs: MkRecord[], today: string) {
+  const signed = (doc: MkRecord) => {
+    const sign = CREDIT_NOTE_TYPES.has(str(doc.doc_type) ?? "") ? -1 : 1;
+    const amount = sign * Math.abs(num(doc.sum_all) ?? 0);
+    const paid = sign * Math.abs(num(doc.sum_paid) ?? 0);
+    return { amount: round2(amount), paid: round2(paid), open: round2(amount - paid) };
+  };
+
+  const opening: Record<string, number> = {};
+  for (const doc of olderOpenDocs) {
+    const currency = str(doc.currency_code) ?? "EUR";
+    opening[currency] = round2((opening[currency] ?? 0) + signed(doc).open);
+  }
+
+  const sorted = [...docs].sort(
+    (a, b) =>
+      (fromMkDate(a.doc_date) ?? "").localeCompare(fromMkDate(b.doc_date) ?? "") ||
+      (str(a.count_code) ?? "").localeCompare(str(b.count_code) ?? "", undefined, { numeric: true }),
+  );
+
+  const balance: Record<string, number> = { ...opening };
+  const totals: Record<string, { invoiced: number; credited: number; paid: number; open: number; overdue: number }> = {};
+  const rows: StatementRow[] = sorted.map((doc) => {
+    const currency = str(doc.currency_code) ?? "EUR";
+    const { amount, paid, open } = signed(doc);
+    const due = fromMkDate(doc.duo_payment);
+    const daysOverdue = due && open > 0 ? Math.max(0, daysBetween(due, today)) : undefined;
+    balance[currency] = round2((balance[currency] ?? 0) + open);
+    const t = (totals[currency] ??= { invoiced: 0, credited: 0, paid: 0, open: 0, overdue: 0 });
+    if (amount >= 0) t.invoiced = round2(t.invoiced + amount);
+    else t.credited = round2(t.credited - amount);
+    t.paid = round2(t.paid + paid);
+    t.open = round2(t.open + open);
+    if (daysOverdue) t.overdue = round2(t.overdue + open);
+    return {
+      date: fromMkDate(doc.doc_date),
+      number: str(doc.count_code),
+      type: str(doc.doc_type),
+      due_date: due,
+      currency,
+      amount,
+      paid,
+      open,
+      ...(daysOverdue ? { days_overdue: daysOverdue } : {}),
+      running_open_balance: balance[currency]!,
+    };
+  });
+
+  return { opening_open_balance: opening, totals_by_currency: totals, closing_open_balance: balance, rows };
+}

@@ -35,11 +35,18 @@
     { "name": "get_document", "description": "One document in full, by id or number (e.g. PP-18495)." },
     { "name": "list_search_filters", "description": "Advanced search filters available for a document type." },
     { "name": "search_products", "description": "Product catalogue search, optionally with stock and prices." },
+    { "name": "get_product", "description": "One product in full: stock, incoming orders, prices, bill of materials." },
     { "name": "get_stock", "description": "Stock, reserved and free amounts per product and warehouse." },
+    { "name": "low_stock", "description": "Products to reorder: out of stock, below safety stock, over-reserved." },
+    { "name": "stock_movements", "description": "One product's stock history for a period." },
+    { "name": "stock_valuation", "description": "Estimated stock value per warehouse at last purchase prices." },
     { "name": "list_warehouses", "description": "All warehouses." },
     { "name": "search_partners", "description": "Customers and suppliers by name, tax number, e-mail or phone." },
+    { "name": "get_partner", "description": "One partner in full, with open receivables and payables." },
+    { "name": "partner_statement", "description": "Statement of account with a running open balance." },
     { "name": "get_unpaid_invoices", "description": "Open receivables or payables with aging and top debtors." },
-    { "name": "sales_summary", "description": "Revenue for a period, grouped by partner, product, month or document type." }
+    { "name": "sales_summary", "description": "Revenue for a period, grouped and optionally compared with an earlier period." },
+    { "name": "purchase_summary", "description": "Spending on supplier invoices, grouped and optionally compared." }
   ],
   "tools_generated": false,
   "user_config": {
