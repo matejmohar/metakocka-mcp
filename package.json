@@ -38,7 +38,7 @@
     "prepublishOnly": "npm run typecheck && npm test && npm run build",
     "pack:mcpb": "node scripts/build-mcpb.mjs",
     "version": "node scripts/sync-version.mjs && git add manifest.json src/version.ts",
-    "doctor": "node dist/index.js --check"
+    "doctor": "node --env-file=.env dist/index.js --check"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.3.1",

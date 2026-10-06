@@ -121,7 +121,7 @@ npm test            # unit + end-to-end tests against a fake Metakocka API
 npm run typecheck
 npm run build
 npm run inspect     # open the MCP Inspector against the built server
-npm run doctor      # check credentials against the real API (reads .env values from your shell)
+npm run doctor      # check credentials from your local .env file (copy .env.example to .env first)
 npm run pack:mcpb   # build release/metakocka-mcp-<version>.mcpb
 ```
 
