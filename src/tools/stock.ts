@@ -15,12 +15,14 @@ import {
 } from "../inventory.js";
 import { str } from "../util.js";
 import { isoDate } from "./documents.js";
+import { stockValuationOutput } from "./output-schemas.js";
 import {
   cachedWarehouses,
   progressReporter,
   READ_ONLY,
   resolveWarehouse,
   run,
+  runStructured,
   truncationWarning,
   warehouseRef,
   type ToolContext,
@@ -122,10 +124,11 @@ export function registerStockTools(server: McpServer, ctx: ToolContext): void {
         top: z.number().int().min(1).max(200).default(20).describe("How many of the most valuable products to list."),
         max_products: maxProductsArg,
       }),
+      outputSchema: stockValuationOutput,
       annotations: READ_ONLY,
     },
     async (args) =>
-      run(async () => {
+      runStructured(async () => {
         const warehouse = await optionalWarehouse(args.warehouse);
         const { products, truncated } = await listAllProducts(
           ctx.getClient(),

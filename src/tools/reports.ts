@@ -6,7 +6,8 @@ import { MetakockaError } from "../client.js";
 import { daysBetween, previousPeriod, samePeriodLastYear, todayInLjubljana } from "../dates.js";
 import { INVOICE_TYPES, PURCHASE_INVOICE_TYPES, SALES_INVOICE_TYPES, type DocType } from "../doc-types.js";
 import { resolvePartner } from "./partners.js";
-import { progressReporter, READ_ONLY, run, truncationWarning, type ToolContext } from "./shared.js";
+import { summaryOutput, unpaidInvoicesOutput } from "./output-schemas.js";
+import { progressReporter, READ_ONLY, runStructured, truncationWarning, type ToolContext } from "./shared.js";
 import { isoDate } from "./documents.js";
 
 const invoiceTypeSchema = z.enum(INVOICE_TYPES);
@@ -34,10 +35,11 @@ export function registerReportTools(server: McpServer, ctx: ToolContext): void {
         max_invoices_listed: z.number().int().min(0).max(500).default(50).describe("How many individual invoices to list (most overdue first). Totals always cover all."),
         max_documents: z.number().int().min(1).max(5000).default(1000).describe("Safety cap on documents fetched from Metakocka per type."),
       }),
+      outputSchema: unpaidInvoicesOutput,
       annotations: READ_ONLY,
     },
     async (args, extra) =>
-      run(async () => {
+      runStructured(async () => {
         const client = ctx.getClient();
         const progress = progressReporter(extra);
         const today = todayInLjubljana(ctx.now());
@@ -145,10 +147,11 @@ function registerSummaryTool(server: McpServer, ctx: ToolContext, spec: SummaryT
         top: z.number().int().min(1).max(200).default(20).describe("How many groups to return (ignored for month)."),
         max_documents: z.number().int().min(1).max(10000).default(3000).describe("Safety cap on documents fetched per type and period."),
       }),
+      outputSchema: summaryOutput,
       annotations: READ_ONLY,
     },
     async (args, extra) =>
-      run(async () => {
+      runStructured(async () => {
         if (daysBetween(args.date_from, args.date_to) < 0) {
           throw new MetakockaError("date_from must be on or before date_to.");
         }

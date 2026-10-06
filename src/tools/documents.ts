@@ -172,14 +172,18 @@ export function registerDocumentTools(server: McpServer, ctx: ToolContext): void
     async (args) => run(() => discoverSearchFilters(ctx.getClient(), args.doc_type)),
   );
 
+  const embedded = ctx.pdfDelivery === "embedded";
   server.registerTool(
     "get_document_pdf",
     {
       title: "Get document PDF",
       description:
-        "Print a document as PDF, exactly as Metakocka prints it, and save it on this computer (by default in Downloads/Metakocka). " +
-        "Returns the file path and a link to open it. Works for sales and purchase invoices out of the box; other document types " +
-        "need the report_id of their print-out. Saving a file does not change anything in Metakocka.",
+        (embedded
+          ? "Print a document as PDF, exactly as Metakocka prints it, and return the PDF file. "
+          : "Print a document as PDF, exactly as Metakocka prints it, and save it on this computer (by default in Downloads/Metakocka). " +
+            "Returns the file path and a link to open it. ") +
+        "Works for sales and purchase invoices out of the box; other document types " +
+        "need the report_id of their print-out. This does not change anything in Metakocka.",
       inputSchema: z
         .object({
           doc_type: docTypeSchema,
@@ -195,11 +199,12 @@ export function registerDocumentTools(server: McpServer, ctx: ToolContext): void
             ),
         })
         .refine((a) => a.id || a.number, { message: "Provide either id or number." }),
-      // Writes a local file, but never changes Metakocka.
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      // Saving writes a local file, but never changes Metakocka.
+      annotations: embedded ? READ_ONLY : { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     async (args): Promise<ToolResult> => {
       let saved: { path: string; name: string } | undefined;
+      let pdf: { name: string; bytes: Uint8Array } | undefined;
       const result = await run(async () => {
         const reportId = args.report_id ?? (INVOICE_PDF_TYPES.has(args.doc_type) ? INVOICE_REPORT_ID : undefined);
         if (!reportId) {
@@ -213,14 +218,25 @@ export function registerDocumentTools(server: McpServer, ctx: ToolContext): void
         if (!id) throw new MetakockaError(`No ${args.doc_type} with number "${args.number}" was found.`);
 
         const bytes = await printDocumentPdf(client, id, reportId);
-        const dir = ctx.pdfDir ?? pdfDirectory();
         const name = `${args.doc_type}_${(args.number ?? id).replace(/[^\p{L}\p{N}._-]+/gu, "-")}.pdf`;
+        const sizeKb = Math.round(bytes.length / 102.4) / 10;
+        if (embedded) {
+          pdf = { name, bytes };
+          return { file_name: name, size_kb: sizeKb, doc_type: args.doc_type, id };
+        }
+        const dir = ctx.pdfDir ?? pdfDirectory();
         const path = join(dir, name);
         await mkdir(dir, { recursive: true });
         await writeFile(path, bytes);
         saved = { path, name };
-        return { saved_to: path, size_kb: Math.round(bytes.length / 102.4) / 10, doc_type: args.doc_type, id };
+        return { saved_to: path, size_kb: sizeKb, doc_type: args.doc_type, id };
       });
+      if (pdf) {
+        result.content.push({
+          type: "resource",
+          resource: { uri: `metakocka://pdf/${encodeURIComponent(pdf.name)}`, mimeType: "application/pdf", blob: Buffer.from(pdf.bytes).toString("base64") },
+        });
+      }
       if (saved) {
         result.content.push({ type: "resource_link", uri: pathToFileURL(saved.path).href, name: saved.name, mimeType: "application/pdf" });
       }

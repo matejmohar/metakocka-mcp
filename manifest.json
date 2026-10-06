@@ -34,7 +34,12 @@
       ],
       "env": {
         "METAKOCKA_COMPANY_ID": "${user_config.company_id}",
-        "METAKOCKA_SECRET_KEY": "${user_config.secret_key}"
+        "METAKOCKA_SECRET_KEY": "${user_config.secret_key}",
+        "METAKOCKA_BASE_URL": "${user_config.base_url}",
+        "NODE_EXTRA_CA_CERTS": "${user_config.ca_cert}",
+        "METAKOCKA_TIMEOUT_SECONDS": "${user_config.timeout_seconds}",
+        "METAKOCKA_CACHE_SECONDS": "${user_config.cache_seconds}",
+        "METAKOCKA_PDF_DIR": "${user_config.pdf_dir}"
       }
     }
   },
@@ -130,6 +135,43 @@
       "description": "Your Metakocka API secret key. Treat it like a password; it is stored in your system keychain.",
       "required": true,
       "sensitive": true
+    },
+    "base_url": {
+      "type": "string",
+      "title": "Metakocka URL",
+      "description": "Leave as is for the public Metakocka. For another installation, enter its address: a domain, internal host name or IP, e.g. https://erp.example.com or http://10.0.0.15:8080. /rest/eshop/v1 is added when no path is given; without http:// or https://, https is used.",
+      "required": false,
+      "default": "https://main.metakocka.si"
+    },
+    "ca_cert": {
+      "type": "file",
+      "title": "CA certificate (optional)",
+      "description": "Only for an installation with a company or self-signed TLS certificate: the CA certificate file (PEM) to trust. Takes effect after restarting Claude.",
+      "required": false
+    },
+    "timeout_seconds": {
+      "type": "number",
+      "title": "Request timeout (seconds)",
+      "description": "How long to wait for Metakocka before giving up. Raise it if large reports time out.",
+      "required": false,
+      "default": 30,
+      "min": 5,
+      "max": 600
+    },
+    "cache_seconds": {
+      "type": "number",
+      "title": "Cache duration (seconds)",
+      "description": "How long warehouses and partner lookups are reused before asking Metakocka again. 0 turns caching off.",
+      "required": false,
+      "default": 300,
+      "min": 0,
+      "max": 86400
+    },
+    "pdf_dir": {
+      "type": "directory",
+      "title": "PDF folder (optional)",
+      "description": "Where invoice PDFs are saved. Default: Downloads/Metakocka.",
+      "required": false
     }
   },
   "compatibility": {
