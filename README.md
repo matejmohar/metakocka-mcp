@@ -197,7 +197,9 @@ npm version minor      # bumps package.json, manifest.json and src/version.ts, c
 git push --follow-tags # the Release workflow builds the .mcpb, creates the GitHub release, publishes to npm
 ```
 
-npm publishing needs an `NPM_TOKEN` repository secret; without it the workflow still publishes the `.mcpb`.
+Only push the tag when you want to release: the Release workflow then creates a GitHub release with the `.mcpb`.
+Publishing to npm needs an `NPM_TOKEN` repository secret; without it that step is skipped with a notice. npm provenance
+is added automatically once the repository is public.
 
 The **Live API check** workflow runs `npm run test:live` every morning against a real Metakocka company, to catch API
 changes on Metakocka's side. It needs the `METAKOCKA_COMPANY_ID` and `METAKOCKA_SECRET_KEY` repository secrets (use a
