@@ -22,6 +22,10 @@ const INSTRUCTIONS = [
   "Documents: search_documents to find, get_document for full detail. Products: search_products, get_stock, list_warehouses.",
   "Partners: search_partners. Reports: get_unpaid_invoices (receivables/payables aging) and sales_summary (revenue).",
   "Dates are YYYY-MM-DD in the Europe/Ljubljana time zone. Amounts are in each document's currency.",
+  "Users may write in Slovenian: račun = invoice (izdani = issued/sales, prejeti = received/purchase), ponudba = offer, " +
+    "naročilo = order, dobavnica = packing list, dobropis = credit note, zaloga = stock, skladišče = warehouse, " +
+    "kupec = customer, dobavitelj = supplier, zapadlo / zapadli = overdue, neplačano = unpaid, davčna številka = tax number. " +
+    "Reply in the language the user writes in.",
   "Metakocka runs searches one at a time per company, so prefer one well-filtered call over many small ones.",
 ].join(" ");
 

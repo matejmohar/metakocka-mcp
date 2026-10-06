@@ -21,6 +21,26 @@ export const DOCUMENT_TYPES = {
   complaint: "Reklamacija (complaint / return)",
 } as const;
 
+/**
+ * Words users actually say (Slovenian, informal or alternative) and the type
+ * they most likely mean. Shown to the model in the document-types resource and
+ * the server instructions; it is guidance, not a lookup the code relies on.
+ */
+export const EVERYDAY_TERMS: Record<string, DocType | DocType[]> = {
+  "ponudba / predračun": "sales_offer",
+  "naročilo kupca / prodajno naročilo": "sales_order",
+  "račun / izdani račun / faktura": ["sales_bill_domestic", "sales_bill_foreign", "sales_bill_retail"],
+  "avans / avansni račun": "sales_bill_prepaid",
+  "dobropis / storno": "sales_bill_credit_note",
+  "naročilo dobavitelju / naročilnica": "purchase_order",
+  "prejeti račun / vhodni račun": ["purchase_bill_domestic", "purchase_bill_foreign"],
+  "dobavnica / odpremnica": "warehouse_packing_list",
+  "prevzemnica / prevzem blaga": "warehouse_acceptance_note",
+  "medskladiščnica / prenos med skladišči": "transfer_order",
+  "delovni nalog / proizvodnja": "workorder",
+  "reklamacija / vračilo": "complaint",
+};
+
 export type DocType = keyof typeof DOCUMENT_TYPES;
 
 export const DOC_TYPE_VALUES = Object.keys(DOCUMENT_TYPES) as [DocType, ...DocType[]];

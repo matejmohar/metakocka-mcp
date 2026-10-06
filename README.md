@@ -15,6 +15,19 @@ Connect it to Claude (or any MCP-capable assistant) and ask questions about your
 
 > This is an independent community project. It is not made or endorsed by Metakocka d.o.o.
 
+## Slovenščina
+
+Strežnik razume slovenska vprašanja in odgovarja v jeziku, v katerem pišete. Primeri:
+
+- *»Kateri kupci imajo zapadle neplačane račune?«*
+- *»Kakšna je zaloga artikla ART-1042 v skladišču Maribor?«*
+- *»Pokaži prodajno naročilo PP-18495 in ali je že izdan račun.«*
+- *»Pripravi opomine za pet največjih dolžnikov.«*
+
+Slovenski izrazi (račun, ponudba, dobavnica, dobropis, zaloga, zapadlo …) so preslikani v tipe dokumentov Metakocke,
+vir `metakocka://document-types` pa vsebuje tudi vsakdanje izraze. Pozivi `monthly-sales-report`, `overdue-invoices` in
+`stock-check` imajo izbirni argument `language` (`sl` ali `en`).
+
 ## Tools
 
 | Tool | What it does |
