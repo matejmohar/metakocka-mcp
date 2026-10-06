@@ -7,6 +7,7 @@
  */
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { ConfigError, loadConfig } from "./config.js";
+import { runDoctor } from "./doctor.js";
 import { createServer } from "./server.js";
 import { VERSION } from "./version.js";
 
@@ -15,10 +16,17 @@ if (arg === "--version" || arg === "-v") {
   process.stderr.write(`${VERSION}\n`);
   process.exit(0);
 }
+if (arg === "--check" || arg === "--doctor") {
+  process.exit(await runDoctor());
+}
 if (arg === "--help" || arg === "-h") {
   process.stderr.write(
     [
       `metakocka-mcp ${VERSION} — MCP server for the Metakocka ERP`,
+      "",
+      "Options:",
+      "  --check                verify credentials and connectivity, then exit",
+      "  --version, -v          print the version",
       "",
       "Environment:",
       "  METAKOCKA_COMPANY_ID   your Metakocka company id (required)",

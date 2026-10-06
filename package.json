@@ -1,7 +1,7 @@
 {
   "name": "metakocka-mcp",
   "version": "0.1.0",
-  "description": "Model Context Protocol (MCP) server for the Metakocka ERP — let Claude and other AI assistants read your documents, invoices, products, stock and partners.",
+  "description": "Model Context Protocol (MCP) server for the Metakocka ERP \u2014 let Claude and other AI assistants read your documents, invoices, products, stock and partners.",
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -35,13 +35,17 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "inspect": "npx @modelcontextprotocol/inspector node dist/index.js",
-    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+    "prepublishOnly": "npm run typecheck && npm test && npm run build",
+    "pack:mcpb": "node scripts/build-mcpb.mjs",
+    "version": "node scripts/sync-version.mjs && git add manifest.json src/version.ts",
+    "doctor": "node dist/index.js --check"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.3.1",
     "zod": "^4.2.0"
   },
   "devDependencies": {
+    "@anthropic-ai/mcpb": "^2.1.2",
     "@modelcontextprotocol/client": "^2.3.1",
     "@types/node": "^22.10.0",
     "tsx": "^4.20.0",

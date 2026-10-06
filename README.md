@@ -34,6 +34,16 @@ resources (`metakocka://warehouses`, `metakocka://document-types`).
 
 ## Setup
 
+### Quickest: Claude Desktop extension
+
+1. Download `metakocka-mcp-<version>.mcpb` from the [latest release](https://github.com/matejmohar/metakocka-mcp/releases/latest).
+2. Double-click it (or drag it into Claude Desktop → Settings → Extensions) and click **Install**.
+3. Paste your company ID and secret key (see step 1 below). The key is stored in your system keychain.
+
+No Node.js or config file needed. To update, download the newer `.mcpb` and open it; it replaces the old version and keeps your settings.
+
+The manual setup below works with any MCP client.
+
 ### 1. Get your Metakocka API credentials
 
 In Metakocka, enable API access and copy your **company ID** and **secret key**. Metakocka's step-by-step guide:
@@ -75,6 +85,15 @@ claude mcp add metakocka \
 
 **Cursor, VS Code and other MCP clients** — use the same command (`npx -y metakocka-mcp`) and environment variables.
 
+### Check your setup
+
+```sh
+npx -y metakocka-mcp --check
+```
+
+(with `METAKOCKA_COMPANY_ID` and `METAKOCKA_SECRET_KEY` set) verifies your credentials and connection, explains what to fix
+if something is wrong, and tells you if a newer version exists.
+
 ### Configuration
 
 | Variable | Required | Default |
@@ -102,6 +121,8 @@ npm test            # unit + end-to-end tests against a fake Metakocka API
 npm run typecheck
 npm run build
 npm run inspect     # open the MCP Inspector against the built server
+npm run doctor      # check credentials against the real API (reads .env values from your shell)
+npm run pack:mcpb   # build release/metakocka-mcp-<version>.mcpb
 ```
 
 Project layout:
@@ -119,12 +140,21 @@ src/
   index.ts        stdio entry point (the `metakocka-mcp` command)
 ```
 
+### Releasing
+
+```sh
+npm version minor      # bumps package.json, manifest.json and src/version.ts, commits and tags
+git push --follow-tags # the Release workflow builds the .mcpb, creates the GitHub release, publishes to npm
+```
+
+npm publishing needs an `NPM_TOKEN` repository secret; without it the workflow still publishes the `.mcpb`.
+
 Metakocka's API reference: [github.com/metakocka/metakocka_api_base](https://github.com/metakocka/metakocka_api_base).
 
 ## Roadmap
 
 - [x] Read-only tools for documents, products, stock, partners, receivables and sales
-- [ ] One-click Claude Desktop extension (`.mcpb`)
+- [x] One-click Claude Desktop extension (`.mcpb`)
 - [ ] Opt-in write tools (create offers and sales orders, change order status) with previews before anything is saved
 - [ ] PDF export of documents
 - [ ] Hosted version: connect from Claude or ChatGPT without installing anything

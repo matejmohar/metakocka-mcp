@@ -1,0 +1,64 @@
+{
+  "manifest_version": "0.3",
+  "name": "metakocka-mcp",
+  "display_name": "Metakocka",
+  "version": "0.1.0",
+  "description": "Ask Claude about your Metakocka ERP: documents, invoices, stock, products and partners. Read-only.",
+  "long_description": "Connects Claude to your Metakocka ERP so you can ask questions about your business in plain language: who owes you money and how overdue they are, top products last month, stock in a warehouse, or the full detail of a sales order. This version is read-only: it cannot create, change or delete anything in Metakocka. Requests go directly from your computer to Metakocka's API. This is an independent community project, not made or endorsed by Metakocka d.o.o.",
+  "author": {
+    "name": "Matej Mohar",
+    "email": "matej@mohar.dev",
+    "url": "https://martej.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/matejmohar/metakocka-mcp.git"
+  },
+  "homepage": "https://github.com/matejmohar/metakocka-mcp",
+  "support": "https://github.com/matejmohar/metakocka-mcp/issues",
+  "license": "MIT",
+  "keywords": ["metakocka", "erp", "invoices", "stock", "accounting"],
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "METAKOCKA_COMPANY_ID": "${user_config.company_id}",
+        "METAKOCKA_SECRET_KEY": "${user_config.secret_key}"
+      }
+    }
+  },
+  "tools": [
+    { "name": "search_documents", "description": "Find offers, orders, invoices, purchase and warehouse documents." },
+    { "name": "get_document", "description": "One document in full, by id or number (e.g. PP-18495)." },
+    { "name": "list_search_filters", "description": "Advanced search filters available for a document type." },
+    { "name": "search_products", "description": "Product catalogue search, optionally with stock and prices." },
+    { "name": "get_stock", "description": "Stock, reserved and free amounts per product and warehouse." },
+    { "name": "list_warehouses", "description": "All warehouses." },
+    { "name": "search_partners", "description": "Customers and suppliers by name, tax number, e-mail or phone." },
+    { "name": "get_unpaid_invoices", "description": "Open receivables or payables with aging and top debtors." },
+    { "name": "sales_summary", "description": "Revenue for a period, grouped by partner, product, month or document type." }
+  ],
+  "tools_generated": false,
+  "user_config": {
+    "company_id": {
+      "type": "string",
+      "title": "Company ID",
+      "description": "Your Metakocka company ID. In Metakocka, enable API access to see it.",
+      "required": true
+    },
+    "secret_key": {
+      "type": "string",
+      "title": "Secret key",
+      "description": "Your Metakocka API secret key. Treat it like a password; it is stored in your system keychain.",
+      "required": true,
+      "sensitive": true
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": { "node": ">=20.0.0" }
+  }
+}
