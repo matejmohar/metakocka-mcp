@@ -3,8 +3,8 @@
   "name": "metakocka-mcp",
   "display_name": "Metakocka",
   "version": "0.5.0",
-  "description": "Ask Claude about your Metakocka ERP: documents, invoices, stock, products and partners. Read-only by default; creating offers can be turned on. Works in Slovenian and English (slovenščina in angleščina).",
-  "long_description": "Connects Claude to your Metakocka ERP so you can ask questions about your business in plain language: who owes you money and how overdue they are, top products last month, stock in a warehouse, or the full detail of a sales order. By default it is read-only. Creating offers (ponudbe / predračuni) can be turned on in the settings: every offer is linked to partners and products that already exist in Metakocka, and you confirm each one before it is saved. It never changes or deletes anything. Requests go directly from your computer to Metakocka's API. This is an independent community project, not made or endorsed by Metakocka d.o.o.",
+  "description": "Ask Claude about your Metakocka ERP: documents, invoices, stock, products and partners. Read-only by default; creating offers and invoices can be turned on. Works in Slovenian and English (slovenščina in angleščina).",
+  "long_description": "Connects Claude to your Metakocka ERP so you can ask questions about your business in plain language: who owes you money and how overdue they are, top products last month, stock in a warehouse, or the full detail of a sales order. By default it is read-only. Creating offers (ponudbe / predračuni) and invoices (računi) can be turned on in the settings: every document is linked to partners and products that already exist in Metakocka, and you confirm each one before it is saved. Invoices are saved not issued, for you to check and issue in Metakocka. It never changes or deletes anything. Requests go directly from your computer to Metakocka's API. This is an independent community project, not made or endorsed by Metakocka d.o.o.",
   "author": {
     "name": "Matej Mohar",
     "email": "matej@mohar.dev",
@@ -41,6 +41,7 @@
         "METAKOCKA_CACHE_SECONDS": "${user_config.cache_seconds}",
         "METAKOCKA_PDF_DIR": "${user_config.pdf_dir}",
         "METAKOCKA_WRITE_OFFERS": "${user_config.allow_offers}",
+        "METAKOCKA_WRITE_INVOICES": "${user_config.allow_invoices}",
         "METAKOCKA_WRITE_CONFIRM": "${user_config.confirm_documents}"
       }
     }
@@ -124,15 +125,15 @@
     },
     {
       "name": "draft_document",
-      "description": "Prepare an offer from existing partners and products, without saving it (only when creating offers is on)."
+      "description": "Prepare an offer or invoice from existing partners and products, without saving it (only when creating them is on)."
     },
     {
       "name": "commit_document",
-      "description": "Save a prepared offer in Metakocka after you confirm it (only when creating offers is on)."
+      "description": "Save a prepared offer or invoice in Metakocka after you confirm it (only when creating them is on)."
     },
     {
       "name": "discard_draft",
-      "description": "Drop a prepared offer (only when creating offers is on)."
+      "description": "Drop a prepared offer or invoice (only when creating them is on)."
     }
   ],
   "tools_generated": false,
@@ -194,10 +195,17 @@
       "required": false,
       "default": false
     },
+    "allow_invoices": {
+      "type": "boolean",
+      "title": "Allow creating invoices",
+      "description": "Let Claude create invoices (računi, domestic and foreign) in Metakocka, also from an offer. They are saved not issued: you check and issue them in Metakocka. Off by default.",
+      "required": false,
+      "default": false
+    },
     "confirm_documents": {
       "type": "boolean",
       "title": "Confirm each document",
-      "description": "Confirm every document before it is saved in Metakocka: Claude Desktop asks you to approve the save and shows the offer's summary. Don't choose \"Always allow\" for it. Turn off only if Claude may save documents without asking.",
+      "description": "Confirm every document before it is saved in Metakocka: Claude Desktop asks you to approve the save and shows the document's summary. Don't choose \"Always allow\" for it. Turn off only if Claude may save documents without asking.",
       "required": false,
       "default": true
     }

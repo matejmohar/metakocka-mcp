@@ -88,10 +88,14 @@ function urlFromEnvIfValid(): string | undefined {
 }
 
 /** Replaces the "Read-only" opening of the instructions when the write tools are on. */
-export function writeInstructions(confirm: "client" | "elicitation" | "never"): string {
+export function writeInstructions(confirm: "client" | "elicitation" | "never", docTypes: readonly string[] = ["sales_offer"]): string {
+  const what = [
+    docTypes.includes("sales_offer") && "offers (ponudba / predračun)",
+    docTypes.some((t) => t.startsWith("sales_bill_")) && "invoices (račun, saved not issued; also from an offer)",
+  ].filter(Boolean);
   return (
     "Access to one company's Metakocka ERP (Slovenian ERP / e-commerce back office): it reads data, and it can create " +
-    "offers (ponudba / predračun). To create one: find the partner (search_partners) and products (search_products) and use " +
+    `${what.join(" and ")}. To create one: find the partner (search_partners) and products (search_products) and use ` +
     "their ids — never guess ids and never create partners or products; call draft_document, show its summary to the user, " +
     "then commit_document. " +
     (confirm === "never"
@@ -106,7 +110,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
   const note = installationNote(options.baseUrl ?? urlFromEnvIfValid());
   let instructions = note ? `${INSTRUCTIONS} ${note}` : INSTRUCTIONS;
   if (options.write) {
-    instructions = instructions.replace(INSTRUCTIONS.slice(0, INSTRUCTIONS.indexOf(" Documents:")), writeInstructions(options.write.settings.confirm));
+    instructions = instructions.replace(INSTRUCTIONS.slice(0, INSTRUCTIONS.indexOf(" Documents:")), writeInstructions(options.write.settings.confirm, options.write.settings.docTypes));
   }
   const server = new McpServer({ name: "metakocka", version: VERSION }, { instructions });
   const ctx: ToolContext = {

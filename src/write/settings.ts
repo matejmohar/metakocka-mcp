@@ -6,9 +6,13 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { ConfigError, envValue } from "../config.js";
 
-/** Document types the write tools can create. Phase 1: offers only. */
-export const WRITABLE_TYPES = { offers: "sales_offer" } as const;
-export type WritableDocType = (typeof WRITABLE_TYPES)[keyof typeof WRITABLE_TYPES];
+/** Document types the write tools can create, by the name that turns them on. */
+export const WRITABLE_TYPES = {
+  offers: ["sales_offer"],
+  invoices: ["sales_bill_domestic", "sales_bill_foreign"],
+} as const;
+export type WritableDocType = (typeof WRITABLE_TYPES)[keyof typeof WRITABLE_TYPES][number];
+export const INVOICE_TYPES: readonly WritableDocType[] = WRITABLE_TYPES.invoices;
 
 export interface WriteSettings {
   docTypes: WritableDocType[];
@@ -29,8 +33,9 @@ export interface WriteSettings {
 const DEFAULT_WRITE_TIMEOUT_MS = 120_000;
 
 /**
- * METAKOCKA_WRITE=offers (or METAKOCKA_WRITE_OFFERS=true, what the Claude
- * Desktop extension's checkbox sets) enables the offer tools. Returns
+ * METAKOCKA_WRITE=offers,invoices (or METAKOCKA_WRITE_OFFERS=true /
+ * METAKOCKA_WRITE_INVOICES=true, what the Claude Desktop extension's
+ * checkboxes set) enables the write tools for those documents. Returns
  * undefined when writing is off. Throws ConfigError for values it doesn't
  * understand, so a typo never silently changes what the server may do.
  */
@@ -38,15 +43,16 @@ export function writeSettingsFromEnv(env: NodeJS.ProcessEnv = process.env): Writ
   const raw = envValue(env, "METAKOCKA_WRITE");
   const names = raw && !["off", "false", "0", "no"].includes(raw.toLowerCase()) ? raw.split(",") : [];
   if (flag(env, "METAKOCKA_WRITE_OFFERS")) names.push("offers");
+  if (flag(env, "METAKOCKA_WRITE_INVOICES")) names.push("invoices");
   if (!names.length) return undefined;
 
   const docTypes: WritableDocType[] = [];
   for (const name of names.map((s) => s.trim().toLowerCase()).filter(Boolean)) {
-    const type = WRITABLE_TYPES[name as keyof typeof WRITABLE_TYPES];
-    if (!type) {
+    const types = WRITABLE_TYPES[name as keyof typeof WRITABLE_TYPES];
+    if (!types) {
       throw new ConfigError(`METAKOCKA_WRITE: unknown value "${name}". Allowed: ${Object.keys(WRITABLE_TYPES).join(", ")}.`);
     }
-    if (!docTypes.includes(type)) docTypes.push(type);
+    for (const type of types) if (!docTypes.includes(type)) docTypes.push(type);
   }
 
   // "true"/"false" come from the extension's "Confirm each document" checkbox.
