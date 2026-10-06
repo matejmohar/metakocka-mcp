@@ -12,6 +12,7 @@ import { registerPartnerTools } from "./tools/partners.js";
 import { registerReportTools } from "./tools/reports.js";
 import type { ToolContext } from "./tools/shared.js";
 import { registerStockTools } from "./tools/stock.js";
+import { registerWriteTools, type WriteContext } from "./tools/write.js";
 import { VERSION } from "./version.js";
 
 export { TtlCache } from "./cache.js";
@@ -37,6 +38,12 @@ export interface CreateServerOptions {
    * the HTTP server, whose disk the user can't reach.
    */
   pdfDelivery?: "file" | "embedded";
+  /**
+   * Turns on the opt-in tools that create documents (METAKOCKA_WRITE). Create
+   * it once and pass the same one to every server instance, because drafts
+   * must survive between requests. Without it the server is read-only.
+   */
+  write?: WriteContext;
 }
 
 const INSTRUCTIONS = [
@@ -80,9 +87,26 @@ function urlFromEnvIfValid(): string | undefined {
   }
 }
 
+/** Replaces the "Read-only" opening of the instructions when the write tools are on. */
+export function writeInstructions(confirm: "always" | "never"): string {
+  return (
+    "Access to one company's Metakocka ERP (Slovenian ERP / e-commerce back office): it reads data, and it can create " +
+    "offers (ponudba / predračun). To create one: find the partner (search_partners) and products (search_products) and use " +
+    "their ids — never guess ids and never create partners or products; call draft_document, show its summary to the user, " +
+    "then commit_document. " +
+    (confirm === "always"
+      ? "The user confirms every document in their client. "
+      : "Save a document only after the user has agreed to its summary in the conversation. ") +
+    "If commit_document reports an unknown outcome, call it again with the same draft_id instead of drafting the document again."
+  );
+}
+
 export function createServer(options: CreateServerOptions = {}): McpServer {
   const note = installationNote(options.baseUrl ?? urlFromEnvIfValid());
-  const instructions = note ? `${INSTRUCTIONS} ${note}` : INSTRUCTIONS;
+  let instructions = note ? `${INSTRUCTIONS} ${note}` : INSTRUCTIONS;
+  if (options.write) {
+    instructions = instructions.replace(INSTRUCTIONS.slice(0, INSTRUCTIONS.indexOf(" Documents:")), writeInstructions(options.write.settings.confirm));
+  }
   const server = new McpServer({ name: "metakocka", version: VERSION }, { instructions });
   const ctx: ToolContext = {
     getClient: options.getClient ?? lazyClientFromEnv(),
@@ -97,6 +121,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
   registerPartnerTools(server, ctx);
   registerReportTools(server, ctx);
   registerBankTools(server, ctx);
+  if (options.write) registerWriteTools(server, ctx, options.write);
   registerResources(server, ctx);
   registerPrompts(server);
   return server;

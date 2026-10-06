@@ -13,8 +13,9 @@ Connect it to Claude (or any MCP-capable assistant) and ask questions about your
 - *"What do we need to reorder, and what is already on the way?"*
 - *"How did our September sales compare with last September, and which customers dropped off?"*
 
-> **Read-only.** This version cannot create, change or delete anything in Metakocka. The only thing it writes is a PDF
-> on your own computer, when you ask for one.
+> **Read-only by default.** Out of the box it cannot create, change or delete anything in Metakocka; the only thing it
+> writes is a PDF on your own computer, when you ask for one. Creating offers can be turned on: see
+> [Creating offers](#creating-offers). It never changes or deletes anything.
 
 > This is an independent community project. It is not made or endorsed by Metakocka d.o.o.
 
@@ -60,6 +61,10 @@ vir `metakocka://document-types` pa vsebuje tudi vsakdanje izraze. Vsi pozivi (n
 | `sales_summary` | Revenue for a period, grouped by partner, product, month or document type; optionally for one customer and compared with the previous period or last year. |
 | `purchase_summary` | Spending on supplier invoices, with the same grouping, partner filter and comparison. |
 | `get_bank_statements` | Money in and out per bank account, top partners, and the individual transactions. |
+| **Creating documents** (off unless turned on, see [Creating offers](#creating-offers)) | |
+| `draft_document` | Prepare an offer from partners and products that already exist in Metakocka, without saving it. |
+| `commit_document` | Save a prepared offer, exactly as prepared, after you confirm it. |
+| `discard_draft` | Drop a prepared offer. |
 
 ### Prompts
 
@@ -153,6 +158,10 @@ newer version exists.
 | `METAKOCKA_TIMEOUT_MS` | no | `30000` (or `METAKOCKA_TIMEOUT_SECONDS`) |
 | `METAKOCKA_CACHE_SECONDS` | no | `300` — how long warehouses and partner lookups are reused; `0` turns caching off |
 | `METAKOCKA_PDF_DIR` | no | `Downloads/Metakocka` — where `get_document_pdf` saves files |
+| `METAKOCKA_WRITE` | no | off — `offers` allows creating offers, see [Creating offers](#creating-offers) |
+| `METAKOCKA_WRITE_CONFIRM` | no | `always` — you confirm each document in your client; `never` saves without asking |
+| `METAKOCKA_WRITE_TIMEOUT_SECONDS` | no | `120` — how long to wait for Metakocka to save a document |
+| `METAKOCKA_WRITE_LOG` | no | `~/.metakocka-mcp/writes.jsonl` — audit log of every write |
 
 ### Other Metakocka installations
 
@@ -203,6 +212,36 @@ the server.
 The server speaks plain HTTP. When other computers connect to it, put it behind a reverse proxy that terminates TLS,
 because secret keys travel in the request headers.
 
+## Creating offers
+
+Off by default. Turn it on with `METAKOCKA_WRITE=offers`, or **Allow creating offers** in the Claude Desktop extension.
+Claude can then create offers (ponudbe, also used as predračuni): *"Pripravi ponudbo za ACME za 10 ur svetovanja."*
+
+Strict rules, enforced by the server rather than left to the assistant:
+
+- **Only links, never creates.** The partner and its address are sent to Metakocka by their ids, and every product
+  line by the product's id. If the partner or a product doesn't exist yet, nothing happens: add it in Metakocka first.
+  (Sent with names or addresses instead, Metakocka would silently create a new partner when it can't match one.)
+- **Prices and VAT come from Metakocka.** Each product's price and tax code are taken from its price list. A product
+  without a clear sales price in EUR, or with more than one tax code, can't be used until it is fixed in Metakocka.
+  You can still set a price or discount for a line.
+- **Draft first, then save.** `draft_document` checks everything and returns a summary; nothing is saved yet.
+  `commit_document` saves exactly that draft and nothing else, at most once. Drafts expire after 15 minutes.
+- **You confirm every offer** in your client before it is saved (MCP elicitation). A client that can't show
+  confirmation prompts can't save documents at all. To save without asking, set `METAKOCKA_WRITE_CONFIRM=never` (or turn
+  off **Confirm each document** in the extension).
+- **Never saved twice.** Saving is never retried automatically. If Metakocka doesn't answer, the result says the
+  outcome is unknown, and the next attempt first looks for the offer in Metakocka.
+- **Checked afterwards.** The saved offer is read back and compared with what you confirmed; any difference is
+  reported.
+- **Logged.** Every attempt and its outcome is appended to `~/.metakocka-mcp/writes.jsonl` (`METAKOCKA_WRITE_LOG`),
+  without the secret key. Each offer also carries `metakocka-mcp <draft id>` in Metakocka's change log.
+
+Not supported yet: foreign partners, partners with category discounts, currencies other than EUR, and lines that aren't
+products (except description-only lines). Nothing can be changed or deleted.
+
+In HTTP mode, writing also requires `METAKOCKA_HTTP_TOKEN`; drafts are kept per company and key.
+
 ## How it works
 
 - Every request goes directly from your computer to Metakocka's API. Nothing passes through a third-party server.
@@ -240,6 +279,7 @@ src/
   inventory.ts    low stock, stock valuation and stock movement calculations
   bank.ts         bank statement calculations
   tools/          MCP tool definitions
+  write/          creating documents: drafts, catalogue, offer rules, saving and checking, audit log
   prompts.ts      MCP prompts
   resources.ts    MCP resources
   installation.ts which Metakocka installation to use: URL normalisation and checks
@@ -273,7 +313,8 @@ Metakocka's API reference: [github.com/metakocka/metakocka_api_base](https://git
 - [x] Read-only tools for documents, products, stock, partners, receivables and sales
 - [x] One-click Claude Desktop extension (`.mcpb`)
 - [x] Partner detail and statements, product detail, low stock, stock movements and valuation, purchase summary, period comparison
-- [ ] Opt-in write tools (create offers and sales orders, change order status) with previews before anything is saved
+- [x] Opt-in creation of offers, linked only to existing partners and products, confirmed by the user
+- [ ] Invoices, sales orders and order status changes
 - [x] PDF export of invoices, bank statements, payment dates, tracking codes, live API check
 - [x] Any Metakocka installation (own domain, internal host or IP), HTTP server mode, structured report output
 - [ ] Hosted version: connect from Claude or ChatGPT without installing anything

@@ -136,6 +136,15 @@ export async function getDocument(
 }
 
 /**
+ * Insert a document. Sent exactly once, never retried: Metakocka inserts a new
+ * document on every put_document without an mk_id, so a retry after a timeout
+ * could create a duplicate. The caller treats a network error as "outcome unknown".
+ */
+export async function putDocument(client: MetakockaClient, payload: MkRecord, timeoutMs: number): Promise<MkRecord> {
+  return client.call("put_document", payload, { idempotent: false, timeoutMs });
+}
+
+/**
  * Find a document by its number as shown in Metakocka (count_code, e.g.
  * "PP-18495" or "1-MK-2344"). Returns undefined when there's no exact match.
  */

@@ -12,6 +12,8 @@ import { baseUrlFromEnv, ConfigError, loadConfig } from "./config.js";
 import { runDoctor } from "./doctor.js";
 import { startHttpServer } from "./http.js";
 import { createServer } from "./server.js";
+import { createWriteContext } from "./tools/write.js";
+import { writeSettingsFromEnv } from "./write/settings.js";
 import { VERSION } from "./version.js";
 
 const HELP = [
@@ -36,6 +38,12 @@ const HELP = [
   "  METAKOCKA_TIMEOUT_MS       request timeout in ms (default 30000)",
   "  METAKOCKA_CACHE_SECONDS    how long warehouses and partner lookups are reused (default 300, 0 = off)",
   "  METAKOCKA_PDF_DIR          where get_document_pdf saves files (default Downloads/Metakocka)",
+  "",
+  "Creating documents (off unless set):",
+  "  METAKOCKA_WRITE                 offers = allow creating offers (ponudbe / predračuni)",
+  "  METAKOCKA_WRITE_CONFIRM         always (default): the user confirms each document in the client; never: no prompt",
+  "  METAKOCKA_WRITE_TIMEOUT_SECONDS how long to wait for Metakocka to save a document (default 120)",
+  "  METAKOCKA_WRITE_LOG             audit log of all writes (default ~/.metakocka-mcp/writes.jsonl)",
   "",
   "HTTP mode:",
   "  Clients send X-Metakocka-Company-Id and X-Metakocka-Secret-Key headers.",
@@ -110,8 +118,19 @@ if (args.http) {
   } catch {
     // already reported above
   }
-  const handle = serveStdio(() => createServer());
-  process.stderr.write(`[metakocka-mcp] ${VERSION} running on stdio${target}\n`);
+  // Created once: drafts must survive between requests.
+  let write: ReturnType<typeof createWriteContext> | undefined;
+  try {
+    const settings = writeSettingsFromEnv();
+    if (settings) write = createWriteContext(settings);
+  } catch (error) {
+    // A bad write setting must never leave writing half on: refuse to start.
+    process.stderr.write(`[metakocka-mcp] ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  }
+  const handle = serveStdio(() => createServer({ write }));
+  const mode = write ? `, creating documents enabled: ${write.settings.docTypes.join(", ")} (confirm: ${write.settings.confirm})` : ", read-only";
+  process.stderr.write(`[metakocka-mcp] ${VERSION} running on stdio${target}${mode}\n`);
 
   const shutdown = () => {
     void handle.close().finally(() => process.exit(0));
