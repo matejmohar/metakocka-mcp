@@ -92,17 +92,26 @@ export function writeInstructions(confirm: "client" | "elicitation" | "never", d
   const what = [
     docTypes.includes("sales_offer") && "offers (ponudba / predračun)",
     docTypes.some((t) => t.startsWith("sales_bill_")) && "invoices (račun, saved not issued; also from an offer)",
+    docTypes.some((t) => t.startsWith("purchase_bill_")) && "received invoices (prejeti račun, copied from the supplier's invoice)",
+    docTypes.includes("partner") && "partners",
+    docTypes.includes("product") && "products",
   ].filter(Boolean);
+  const records = [docTypes.includes("partner") && "partners", docTypes.includes("product") && "products"].filter(Boolean);
+  const recordTools = [docTypes.includes("partner") && "draft_partner", docTypes.includes("product") && "draft_product"].filter(Boolean);
+  const missing = records.length
+    ? `never guess ids. If a partner or product is missing, ask the user whether to add it; only then use ${recordTools.join(" / ")} ` +
+      `(copy its data from the document), confirm and save it, and continue with the new id${records.length < 2 ? `; ${records[0] === "partners" ? "products" : "partners"} are never created here` : ""}. `
+    : "never guess ids and never create partners or products. ";
   return (
     "Access to one company's Metakocka ERP (Slovenian ERP / e-commerce back office): it reads data, and it can create " +
-    `${what.join(" and ")}. To create one: find the partner (search_partners) and products (search_products) and use ` +
-    "their ids — never guess ids and never create partners or products; call draft_document, show its summary to the user, " +
+    `${what.length > 1 ? `${what.slice(0, -1).join(", ")} and ${what.at(-1)}` : what[0]}. To create a document: find the partner (search_partners) and products (search_products) and use ` +
+    `their ids — ${missing}Call ${[docTypes.some((t) => t !== "partner" && t !== "product") && "draft_document", ...recordTools].filter(Boolean).join(" / ")}, show its summary to the user, ` +
     "then commit_document. " +
     (confirm === "never"
-      ? "Save a document only after the user has agreed to its summary in the conversation. "
-      : "The user confirms every document in their client" +
+      ? "Save only after the user has agreed to the summary in the conversation. "
+      : "The user confirms every save in their client" +
         (confirm === "client" ? "; pass the draft's summary as confirm_summary, copied exactly. " : ". ")) +
-    "If commit_document reports an unknown outcome, call it again with the same draft_id instead of drafting the document again."
+    "If commit_document reports an unknown outcome, call it again with the same draft_id instead of drafting again."
   );
 }
 

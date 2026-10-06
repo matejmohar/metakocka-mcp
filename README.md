@@ -14,8 +14,8 @@ Connect it to Claude (or any MCP-capable assistant) and ask questions about your
 - *"How did our September sales compare with last September, and which customers dropped off?"*
 
 > **Read-only by default.** Out of the box it cannot create, change or delete anything in Metakocka; the only thing it
-> writes is a PDF on your own computer, when you ask for one. Creating offers and invoices can be turned on: see
-> [Creating offers and invoices](#creating-offers-and-invoices). It never changes or deletes anything.
+> writes is a PDF on your own computer, when you ask for one. Creating offers, invoices, received invoices, partners and products can be turned on:
+> see [Creating documents](#creating-documents). It never changes or deletes anything.
 
 > This is an independent community project. It is not made or endorsed by Metakocka d.o.o.
 
@@ -61,10 +61,12 @@ vir `metakocka://document-types` pa vsebuje tudi vsakdanje izraze. Vsi pozivi (n
 | `sales_summary` | Revenue for a period, grouped by partner, product, month or document type; optionally for one customer and compared with the previous period or last year. |
 | `purchase_summary` | Spending on supplier invoices, with the same grouping, partner filter and comparison. |
 | `get_bank_statements` | Money in and out per bank account, top partners, and the individual transactions. |
-| **Creating documents** (off unless turned on, see [Creating offers and invoices](#creating-offers-and-invoices)) | |
-| `draft_document` | Prepare an offer or invoice from partners and products that already exist in Metakocka, without saving it. |
-| `commit_document` | Save a prepared offer or invoice, exactly as prepared, after you confirm it. |
-| `discard_draft` | Drop a prepared offer or invoice. |
+| **Creating documents** (off unless turned on, see [Creating documents](#creating-documents)) | |
+| `draft_document` | Prepare an offer, invoice or received invoice from partners and products that already exist in Metakocka, without saving it. |
+| `draft_partner` | Prepare a new partner (e.g. a supplier, from its invoice) that isn't in Metakocka yet, without saving it. |
+| `draft_product` | Prepare a new product (e.g. to book a received invoice to), without saving it. |
+| `commit_document` | Save a prepared document, partner or product, exactly as prepared, after you confirm it. |
+| `discard_draft` | Drop a prepared document, partner or product. |
 
 ### Prompts
 
@@ -158,7 +160,7 @@ newer version exists.
 | `METAKOCKA_TIMEOUT_MS` | no | `30000` (or `METAKOCKA_TIMEOUT_SECONDS`) |
 | `METAKOCKA_CACHE_SECONDS` | no | `300` — how long warehouses and partner lookups are reused; `0` turns caching off |
 | `METAKOCKA_PDF_DIR` | no | `Downloads/Metakocka` — where `get_document_pdf` saves files |
-| `METAKOCKA_WRITE` | no | off — `offers`, `invoices` or `offers,invoices`, see [Creating offers and invoices](#creating-offers-and-invoices) |
+| `METAKOCKA_WRITE` | no | off — comma-separated `offers`, `invoices`, `purchase_invoices`, `partners`, `products`, see [Creating documents](#creating-documents) |
 | `METAKOCKA_WRITE_CONFIRM` | no | `client` — you confirm each document in a prompt, or by approving the save in your client; `elicitation` — prompts only; `never` — no confirmation |
 | `METAKOCKA_WRITE_TIMEOUT_SECONDS` | no | `120` — how long to wait for Metakocka to save a document |
 | `METAKOCKA_WRITE_LOG` | no | `~/.metakocka-mcp/writes.jsonl` — audit log of every write |
@@ -212,14 +214,17 @@ the server.
 The server speaks plain HTTP. When other computers connect to it, put it behind a reverse proxy that terminates TLS,
 because secret keys travel in the request headers.
 
-## Creating offers and invoices
+## Creating documents
 
-Off by default. Turn it on with `METAKOCKA_WRITE=offers`, `invoices` or `offers,invoices`, or with **Allow creating
-offers** / **Allow creating invoices** in the Claude Desktop extension. Claude can then create:
+Off by default. Turn it on with `METAKOCKA_WRITE` set to any of `offers`, `invoices`, `purchase_invoices`, `partners`,
+`products` (comma-separated), or with **Allow creating offers** / **Allow creating invoices** / **Allow entering received
+invoices** / **Allow adding partners** / **Allow adding products** in the Claude Desktop extension. Claude can then create:
 
 - offers (ponudbe, also used as predračuni): *"Pripravi ponudbo za ACME za 10 ur svetovanja."*
 - invoices (računi), domestic and foreign: *"Naredi račun za ACME za 3 ure svetovanja."*,
   *"Izstavi račun iz ponudbe 4/2026."*
+- received invoices (prejeti računi), domestic and foreign, copied from the supplier's invoice:
+  *"Vnesi ta račun od Avanta."* (with the PDF)
 
 Strict rules, enforced by the server rather than left to the assistant:
 
@@ -259,8 +264,33 @@ Invoices in particular:
   (reverse charge, export). The VAT note is copied from the partner's last foreign invoice unless you give one; the
   summary shows it.
 
+Received invoices in particular:
+
+- **Copied from the supplier's invoice, and checked.** Claude reads the supplier's invoice (e.g. the PDF you give it)
+  and passes its number, dates, total and every line with its net price, VAT rate and text. The lines must add up to
+  the invoice's total to the cent, or nothing is drafted.
+- **Booked to products marked for purchasing**, usually the one the supplier's earlier invoices use. The VAT rate is
+  mapped to the tax code the supplier's earlier invoices or the catalogue use for it.
+- **Never twice.** An invoice number already entered for that supplier is refused (Metakocka itself would accept it).
+- **Negative lines** (credits, e.g. unused time) can't be sent through Metakocka's API. They are left out, listed in
+  the invoice's note and in the summary, for you to add by hand.
+- **Stock receipt.** Saving makes the receipt (prevzemnica), as Metakocka's own form does.
+- **Payment term** as on the invoice, else from the supplier (its term in Metakocka or its last invoice).
+- **The PDF is attached** to the invoice in Metakocka when Claude passes its path (only when the server runs on your
+  computer, not in HTTP mode).
+
+New partners and products (`partners`, `products`):
+
+- **Only when you agree.** Documents still link only to existing records. When a supplier or product is missing, Claude
+  asks whether to add it, drafts it (a supplier's data copied from its invoice), you confirm it, and then the document
+  is drafted with it.
+- **No duplicates.** A partner with the same tax number (with or without the SI prefix) or name, or a product with the
+  same code or name, is refused; similar names are shown in the summary.
+- **Partners can't be deleted through Metakocka's API**, only in Metakocka itself. Products can be.
+- New products get no price list: give the price on the document.
+
 Not supported yet: offers to foreign partners, foreign invoices with VAT, partners with category discounts, currencies
-other than EUR, invoices from sales orders, and lines that aren't products (Metakocka's API has no description-only
+other than EUR (also on received invoices), invoices from sales orders, marking received invoices paid, and lines that aren't products (Metakocka's API has no description-only
 lines). Nothing can be changed or deleted.
 
 In HTTP mode, writing also requires `METAKOCKA_HTTP_TOKEN`; drafts are kept per company and key.
@@ -302,7 +332,7 @@ src/
   inventory.ts    low stock, stock valuation and stock movement calculations
   bank.ts         bank statement calculations
   tools/          MCP tool definitions
-  write/          creating documents: drafts, catalogue, offer and invoice rules, saving and checking, audit log
+  write/          creating documents and register entries: drafts, rules per document, saving, audit log
   prompts.ts      MCP prompts
   resources.ts    MCP resources
   installation.ts which Metakocka installation to use: URL normalisation and checks
@@ -338,6 +368,8 @@ Metakocka's API reference: [github.com/metakocka/metakocka_api_base](https://git
 - [x] Partner detail and statements, product detail, low stock, stock movements and valuation, purchase summary, period comparison
 - [x] Opt-in creation of offers, linked only to existing partners and products, confirmed by the user
 - [x] Opt-in creation of invoices (domestic and foreign, also from an offer), saved not issued
+- [x] Opt-in entry of received invoices from the supplier's invoice, with its PDF attached
+- [x] Opt-in adding of missing partners and products, checked for duplicates
 - [ ] Sales orders and order status changes
 - [x] PDF export of invoices, bank statements, payment dates, tracking codes, live API check
 - [x] Any Metakocka installation (own domain, internal host or IP), HTTP server mode, structured report output

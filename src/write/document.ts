@@ -41,6 +41,16 @@ export class DraftError extends MetakockaError {
 /** Marks a document as created by this server in Metakocka's change log (max 50 characters). */
 export const CHANGE_LOG_PREFIX = "metakocka-mcp";
 
+/** get_partner answers "no partner with such properties" with an error (opr_code 2); here that is an empty list. */
+export async function findPartners(client: MetakockaClient, q: Parameters<typeof searchPartners>[1]): Promise<MkRecord[]> {
+  try {
+    return await searchPartners(client, q);
+  } catch (error) {
+    if (error instanceof MetakockaError && error.oprCode === "2") return [];
+    throw error;
+  }
+}
+
 export interface ResolvedPartner {
   id: string;
   name?: string;
@@ -49,13 +59,16 @@ export interface ResolvedPartner {
   addresses: MkRecord[];
 }
 
-/** The partner by its id, refused when it is foreign and `foreign` isn't allowed, or has category discounts. */
+/**
+ * The partner by its id, refused when it is foreign and `foreign` isn't allowed, or (for sales documents)
+ * has category discounts.
+ */
 export async function resolvePartner(
   client: MetakockaClient,
   partnerId: string,
-  { foreign, what }: { foreign: "refuse" | "allow"; what: string },
+  { foreign, what, discounts = "refuse" }: { foreign: "refuse" | "allow"; what: string; discounts?: "refuse" | "ignore" },
 ): Promise<ResolvedPartner> {
-  const found = (await searchPartners(client, { partnerId, withDiscounts: true })).filter((p) => str(p.mk_id) === partnerId);
+  const found = (await findPartners(client, { partnerId, withDiscounts: true })).filter((p) => str(p.mk_id) === partnerId);
   if (found.length !== 1) {
     throw new DraftError(
       `No partner with id ${partnerId} in Metakocka. Find the partner with search_partners and use its id; ` +
@@ -68,7 +81,7 @@ export async function resolvePartner(
   if (isForeign && foreign === "refuse") {
     throw new DraftError(`${name} is a foreign partner. ${what} for foreign partners are not supported yet; create it in Metakocka.`);
   }
-  if (asArray(p.discounts).length) {
+  if (discounts === "refuse" && asArray(p.discounts).length) {
     throw new DraftError(
       `${name} has partner discounts per product category in Metakocka. They are not applied automatically yet, ` +
         "so this document can't be created here; create it in Metakocka.",
@@ -132,6 +145,7 @@ export function productLine(catalog: Map<string, CatalogProduct>, line: LineInpu
     throw new DraftError(`Line ${n}: ${product.name} has ${product.problem ?? "no tax code"}. Fix its price list in Metakocka.`);
   }
   const price = line.price ?? product.price;
+  if (price !== undefined && price < 0) throw new DraftError(`Line ${n}: the price can't be negative.`);
   if (price === undefined) throw new DraftError(`Line ${n}: ${product.name} has ${product.problem ?? "no price"}. Give the price explicitly.`);
   const quantity = line.quantity;
   if (quantity === undefined || !(quantity > 0)) throw new DraftError(`Line ${n}: quantity must be more than 0.`);

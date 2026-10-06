@@ -40,8 +40,8 @@ const HELP = [
   "  METAKOCKA_PDF_DIR          where get_document_pdf saves files (default Downloads/Metakocka)",
   "",
   "Creating documents (off unless set):",
-  "  METAKOCKA_WRITE                 offers, invoices or offers,invoices = allow creating offers (ponudbe /",
-  "                                  predračuni) and/or invoices (računi, saved not issued)",
+  "  METAKOCKA_WRITE                 comma-separated: offers (ponudbe / predračuni), invoices (računi, saved",
+  "                                  not issued), purchase_invoices (prejeti računi), partners, products",
   "  METAKOCKA_WRITE_CONFIRM         client (default): the user confirms each document in a prompt, or by approving",
   "                                  the save in the client; elicitation: prompt only; never: no confirmation",
   "  METAKOCKA_WRITE_TIMEOUT_SECONDS how long to wait for Metakocka to save a document (default 120)",
@@ -124,7 +124,7 @@ if (args.http) {
   let write: ReturnType<typeof createWriteContext> | undefined;
   try {
     const settings = writeSettingsFromEnv();
-    if (settings) write = createWriteContext(settings);
+    if (settings) write = createWriteContext(settings, { localFiles: true });
   } catch (error) {
     // A bad write setting must never leave writing half on: refuse to start.
     process.stderr.write(`[metakocka-mcp] ${error instanceof Error ? error.message : String(error)}\n`);

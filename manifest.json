@@ -3,8 +3,8 @@
   "name": "metakocka-mcp",
   "display_name": "Metakocka",
   "version": "0.6.0",
-  "description": "Ask Claude about your Metakocka ERP: documents, invoices, stock, products and partners. Read-only by default; creating offers and invoices can be turned on. Works in Slovenian and English (slovenščina in angleščina).",
-  "long_description": "Connects Claude to your Metakocka ERP so you can ask questions about your business in plain language: who owes you money and how overdue they are, top products last month, stock in a warehouse, or the full detail of a sales order. By default it is read-only. Creating offers (ponudbe / predračuni) and invoices (računi) can be turned on in the settings: every document is linked to partners and products that already exist in Metakocka, and you confirm each one before it is saved. Invoices are saved not issued, for you to check and issue in Metakocka. It never changes or deletes anything. Requests go directly from your computer to Metakocka's API. This is an independent community project, not made or endorsed by Metakocka d.o.o.",
+  "description": "Ask Claude about your Metakocka ERP: documents, invoices, stock, products and partners. Read-only by default; creating offers, invoices, received invoices, partners and products can be turned on. Works in Slovenian and English (slovenščina in angleščina).",
+  "long_description": "Connects Claude to your Metakocka ERP so you can ask questions about your business in plain language: who owes you money and how overdue they are, top products last month, stock in a warehouse, or the full detail of a sales order. By default it is read-only. Creating offers (ponudbe / predračuni), invoices (računi) and received invoices (prejeti računi, copied from the supplier's PDF) can be turned on in the settings, and so can adding new partners and products: documents are linked to partners and products that exist in Metakocka (or that you have just added), and you confirm each one before it is saved. Invoices are saved not issued, for you to check and issue in Metakocka. It never changes or deletes anything. Requests go directly from your computer to Metakocka's API. This is an independent community project, not made or endorsed by Metakocka d.o.o.",
   "author": {
     "name": "Matej Mohar",
     "email": "matej@mohar.dev",
@@ -42,6 +42,9 @@
         "METAKOCKA_PDF_DIR": "${user_config.pdf_dir}",
         "METAKOCKA_WRITE_OFFERS": "${user_config.allow_offers}",
         "METAKOCKA_WRITE_INVOICES": "${user_config.allow_invoices}",
+        "METAKOCKA_WRITE_PURCHASE_INVOICES": "${user_config.allow_purchase_invoices}",
+        "METAKOCKA_WRITE_PARTNERS": "${user_config.allow_partners}",
+        "METAKOCKA_WRITE_PRODUCTS": "${user_config.allow_products}",
         "METAKOCKA_WRITE_CONFIRM": "${user_config.confirm_documents}"
       }
     }
@@ -125,15 +128,23 @@
     },
     {
       "name": "draft_document",
-      "description": "Prepare an offer or invoice from existing partners and products, without saving it (only when creating them is on)."
+      "description": "Prepare an offer, invoice or received invoice from existing partners and products, without saving it (only when creating them is on)."
+    },
+    {
+      "name": "draft_partner",
+      "description": "Prepare a new partner (e.g. a supplier from its invoice), without saving it (only when adding partners is on)."
+    },
+    {
+      "name": "draft_product",
+      "description": "Prepare a new product, e.g. to book a received invoice to, without saving it (only when adding products is on)."
     },
     {
       "name": "commit_document",
-      "description": "Save a prepared offer or invoice in Metakocka after you confirm it (only when creating them is on)."
+      "description": "Save a prepared document, partner or product in Metakocka after you confirm it (only when creating them is on)."
     },
     {
       "name": "discard_draft",
-      "description": "Drop a prepared offer or invoice (only when creating them is on)."
+      "description": "Drop a prepared document, partner or product (only when creating them is on)."
     }
   ],
   "tools_generated": false,
@@ -199,6 +210,27 @@
       "type": "boolean",
       "title": "Allow creating invoices",
       "description": "Let Claude create invoices (računi, domestic and foreign) in Metakocka, also from an offer. They are saved not issued: you check and issue them in Metakocka. Off by default.",
+      "required": false,
+      "default": false
+    },
+    "allow_purchase_invoices": {
+      "type": "boolean",
+      "title": "Allow entering received invoices",
+      "description": "Let Claude enter received invoices (prejeti računi, domestic and foreign) from the supplier's invoice, with its PDF attached, booked to products that already exist. Off by default.",
+      "required": false,
+      "default": false
+    },
+    "allow_partners": {
+      "type": "boolean",
+      "title": "Allow adding partners",
+      "description": "Let Claude add a missing partner (e.g. a new supplier, from its invoice) when you agree. Checked for duplicates and confirmed by you. Partners can only be deleted in Metakocka itself. Off by default.",
+      "required": false,
+      "default": false
+    },
+    "allow_products": {
+      "type": "boolean",
+      "title": "Allow adding products",
+      "description": "Let Claude add a missing product (e.g. to book a received invoice to) when you agree. Checked for duplicates and confirmed by you. Off by default.",
       "required": false,
       "default": false
     },

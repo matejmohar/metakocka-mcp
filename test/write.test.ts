@@ -6,7 +6,7 @@
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { createMcpHandler, InMemoryTransport } from "@modelcontextprotocol/server";
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TtlCache } from "../src/cache.js";
@@ -49,6 +49,7 @@ const PRODUCTS = [
   { mk_id: "P3", count_code: "3", code: "OLD", name: "Star artikel", sales: "true", activated: "false", pricelist: priced() },
   { mk_id: "P4", count_code: "4", code: "INT", name: "Interno", sales: "false", activated: "true", pricelist: priced() },
   { mk_id: "P5", count_code: "5", code: "NOPRICE", name: "Brez cene", sales: "true", activated: "true" },
+  { mk_id: "P7", count_code: "7", code: "DOM", name: "Domene", unit: "kos", service: "false", sales: "false", purchasing: "true", activated: "true" },
   { mk_id: "P6", count_code: "6", code: "SUPPORT", name: "Support", unit: "h", service: "true", sales: "true", activated: "true", pricelist: priced("000", "0", "35") },
 ];
 
@@ -59,15 +60,35 @@ interface FakeOptions {
   search?: Handler;
   /** Existing documents get_document returns, by id. */
   documents?: Record<string, Record<string, unknown>>;
+  /** Products in the catalogue (default PRODUCTS); add_product adds to it. */
+  products?: Record<string, unknown>[];
 }
 
 /** A Metakocka that knows one partner and a small catalogue, and stores offers it is given. */
 function metakocka(o: FakeOptions = {}) {
-  const partners = o.partners ?? [partner()];
+  const partners = [...(o.partners ?? [partner()])];
+  const products = [...(o.products ?? PRODUCTS)];
   const saved: Body[] = [];
+  const has = (value: unknown, part: unknown) => String(value ?? "").toLowerCase().includes(String(part).toLowerCase());
   const handlers: Record<string, Handler> = {
-    get_partner: (body) => ({ opr_code: "0", partner_list: partners.filter((p) => p.mk_id === body.partner_id) }),
-    "json/product_list": (body) => ({ opr_code: "0", product_list: Number(body.offset) > 0 ? [] : PRODUCTS }),
+    get_partner: (body) => {
+      const list = partners.filter((p) =>
+        body.partner_id ? p.mk_id === body.partner_id : body.partner_name ? has(p.customer, body.partner_name) : has(p.tax_id_number, body.partner_tax_number),
+      );
+      return list.length ? { opr_code: "0", partner_list: list } : { opr_code: "2", opr_desc: "No partner with such properties." };
+    },
+    "json/product_list": (body) => ({ opr_code: "0", product_list: Number(body.offset) > 0 ? [] : products }),
+    add_partner: (body) => {
+      const p = body.partner as Body;
+      const id = `NEWP${partners.length}`;
+      partners.push({ ...p, mk_id: id, partner_delivery_address_list: [{ mk_id: `${id}A`, address_type: "Račun", street: p.street, post_number: p.post_number, city: p.place, country: p.country }] });
+      return { mk_id: id, mk_address_id_list: { mk_id: `${id}A`, street: p.street } };
+    },
+    "json/product_add": (body) => {
+      const id = `NEWPR${products.length}`;
+      products.push({ ...body, mk_id: id, count_code: String(products.length + 1), activated: "true" });
+      return { opr_code: "0", mk_id: id, count_code: String(products.length) };
+    },
     put_document: (body) => {
       saved.push(body);
       if (o.put) return o.put(body);
@@ -82,7 +103,7 @@ function metakocka(o: FakeOptions = {}) {
     search: o.search ?? (() => ({ opr_code: "0", result_all_records: "0", result: [] })),
   };
   const fake = fakeMetakocka(handlers);
-  return { ...fake, saved, puts: () => fake.calls.filter((c) => c.endpoint === "put_document") };
+  return { ...fake, saved, partners, products, puts: () => fake.calls.filter((c) => c.endpoint === "put_document") };
 }
 
 /** What get_document would return for a put_document body. */
@@ -91,7 +112,7 @@ function storedFrom(put: Body) {
   const total = lines.reduce((s, l) => s + Number(l.amount) * Number(l.price) * (1 - Number(l.discount ?? 0) / 100) * (l.tax === "EX4" ? 1.22 : 1), 0);
   return {
     doc_type: "sales_offer",
-    count_code: "3/2026",
+    count_code: put.count_code ?? "3/2026",
     partner: { ...(put.partner as Body), customer: "ACME d.o.o." },
     product_list: lines.map((l) => (l.mk_id ? { ...l, code: PRODUCTS.find((p) => p.mk_id === l.mk_id)?.code } : l)),
     sum_all: String(Math.round(total * 100) / 100),
@@ -175,6 +196,9 @@ describe("write tools are opt-in", () => {
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers", METAKOCKA_WRITE_CONFIRM: "never" })?.confirm).toBe("never");
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers,invoices" })?.docTypes).toEqual(["sales_offer", "sales_bill_domestic", "sales_bill_foreign"]);
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "invoices" })?.docTypes).toEqual(["sales_bill_domestic", "sales_bill_foreign"]);
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE_PURCHASE_INVOICES: "true" })?.docTypes).toEqual(["purchase_bill_domestic", "purchase_bill_foreign"]);
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "partners,products" })?.docTypes).toEqual(["partner", "product"]);
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE_PARTNERS: "true", METAKOCKA_WRITE_PRODUCTS: "false" })?.docTypes).toEqual(["partner"]);
     expect(() => writeSettingsFromEnv({ METAKOCKA_WRITE: "offers,orders" })).toThrow(ConfigError);
     // The Claude Desktop extension's checkboxes.
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "false", METAKOCKA_WRITE_CONFIRM: "true" })).toBeUndefined();
@@ -688,8 +712,8 @@ describe("invoices", () => {
 
   it("keeps offer and invoice fields apart", async () => {
     const { client } = await connect(metakocka({ partners: [withTerm("8")] }), { write: write() });
-    expect(parse((await draft(client, { ...OFFER, due_days: 8 })).result)).toMatch(/due_days: only for invoices/);
-    expect(parse((await draft(client, { ...DOMESTIC, valid_days: 8 })).result)).toMatch(/valid_days: only for offers/);
+    expect(parse((await draft(client, { ...OFFER, due_days: 8 })).result)).toMatch(/due_days: not for sales_offer/);
+    expect(parse((await draft(client, { ...DOMESTIC, valid_days: 8 })).result)).toMatch(/valid_days: not for sales_bill_domestic/);
     expect(parse((await draft(client, { ...DOMESTIC, service_from: "2026-10-09", service_to: "2026-10-01" })).result)).toMatch(/service_from is after service_to/);
   });
 
@@ -717,3 +741,283 @@ describe("invoices", () => {
     expect(Object.keys((offerTool.inputSchema as { properties: object }).properties)).not.toContain("from_offer");
   });
 });
+
+describe("purchase invoices", () => {
+  const PURCHASES: WriteSettings = { docTypes: ["purchase_bill_domestic", "purchase_bill_foreign"], confirm: "never", timeoutMs: 120_000 };
+  const write = (localFiles = false): WriteContext => ({ ...quiet(PURCHASES), localFiles });
+  const SUPPLIER = partner({ mk_id: "400072814957", customer: "AVANT.SI d.o.o.", tax_id_number: "SI50709429" });
+  const FOREIGN_SUPPLIER = partner({
+    mk_id: "400072815162",
+    customer: "OpenAI Ireland Limited",
+    tax_id_number: "IE3255131SH",
+    foreign_county: "true",
+    partner_delivery_address_list: [{ mk_id: "400084317622", street: "1st Floor, The Liffey Trust Centre", city: "Dublin", country: "Ireland" }],
+  });
+  const AVANT = {
+    doc_type: "purchase_bill_domestic",
+    partner_id: "400072814957",
+    supplier_invoice_number: "126-039951",
+    invoice_date: "2026-09-30",
+    due_date: "2026-10-01",
+    invoice_total: 38.98,
+    lines: [
+      { code: "DOM", quantity: 1, price: 17.21, discount_percent: 4.77, vat_percent: 22, description: "smaragdna.com" },
+      { code: "DOM", quantity: 1, price: 16.38, discount_percent: 4.98, vat_percent: 22, description: "martej.si" },
+    ],
+  };
+  const OPENAI = {
+    doc_type: "purchase_bill_foreign",
+    partner_id: "400072815162",
+    supplier_invoice_number: "TYJI3TBO-0007",
+    invoice_date: "2026-09-30",
+    due_date: "2026-09-30",
+    invoice_total: 145.43,
+    lines: [
+      { code: "DOM", quantity: 1, price: 187.7, vat_percent: 0, description: "Sep 30–Oct 30, 2026" },
+      { code: "DOM", quantity: 1, price: -42.27, vat_percent: 0, description: "Unused time after 30 Sep 2026" },
+    ],
+  };
+  const earlier = (partnerId: string, docs: Record<string, unknown>[]) => (body: Body) =>
+    filterValue(body, "partner_mk_id") === partnerId
+      ? { opr_code: "0", result_all_records: String(docs.length), result: docs.map((d) => ({ partner: { mk_id: partnerId }, ...d })) }
+      : { opr_code: "0", result_all_records: "0", result: [] };
+
+  it("copies the supplier's invoice: its number, dates, lines with their text, checked against its total", async () => {
+    const fake = metakocka({ partners: [SUPPLIER] });
+    const { client } = await connect(fake, { write: write() });
+    const { body } = await draft(client, AVANT);
+    expect(body).toMatchObject({ supplier_invoice_number: "126-039951", invoice_date: "2026-09-30", received_date: "2026-09-30", due_date: "2026-10-01", due_from: "given" });
+    expect(body.totals).toEqual({ net: 31.95, tax: 7.03, gross: 38.98, currency: "EUR" });
+    expect(body.summary).toBe(
+      [
+        "Vnesi PREJETI RAČUN 126-039951 od AVANT.SI d.o.o. (SI50709429)",
+        "Glavna 1, 1000 Ljubljana, Slovenia",
+        "",
+        "Postavke:",
+        "  1. 1 × Domene (smaragdna.com) à 17,21 € −4.77 % = 16,39 €",
+        "  2. 1 × Domene (martej.si) à 16,38 € −4.98 % = 15,56 €",
+        "",
+        "Osnova: 31,95 €",
+        "DDV: 7,03 €",
+        "Skupaj z DDV: 38,98 €",
+        "",
+        "Datum računa 2026-09-30 · prejeto 2026-09-30 · rok plačila 2026-10-01",
+      ].join("\n"),
+    );
+    await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } });
+    const { company_id: _c, secret_key: _s, ...sent } = fake.puts()[0]!.body;
+    expect(sent).toEqual({
+      doc_type: "purchase_bill_domestic",
+      count_code: "126-039951",
+      doc_date: "30.09.2026",
+      receive_date: "30.09.2026",
+      duo_payment: "01.10.2026",
+      partner: { mk_id: "400072814957", mk_address_id: "400079138037" },
+      currency_code: "EUR",
+      product_list: [
+        { mk_id: "P7", code: "DOM", count_code: "7", amount: "1", price: "17.21", discount: "4.77", tax: "EX4", doc_desc: "smaragdna.com" },
+        { mk_id: "P7", code: "DOM", count_code: "7", amount: "1", price: "16.38", discount: "4.98", tax: "EX4", doc_desc: "martej.si" },
+      ],
+      document_change_log_notes: `metakocka-mcp ${body.draft_id}`,
+    });
+
+    // The same number again is refused, even before Metakocka shows it.
+    expect(parse((await draft(client, AVANT)).result)).toMatch(/126-039951 from AVANT.SI d.o.o. is already in Metakocka/);
+  });
+
+  it("refuses what doesn't add up or isn't there", async () => {
+    const fake = metakocka({
+      partners: [SUPPLIER, FOREIGN_SUPPLIER],
+      search: earlier("400072814957", [{ count_code: "126 - 039951".replace(/ /g, ""), doc_date: "2026-09-30+02:00", duo_payment: "2026-10-01+02:00" }]),
+    });
+    const { client } = await connect(fake, { write: write() });
+    const err = async (args: Record<string, unknown>) => parse((await draft(client, args)).result);
+    expect(await err(AVANT)).toMatch(/already in Metakocka/);
+    const fresh = { ...AVANT, supplier_invoice_number: "126-040000" };
+    expect(await err({ ...fresh, invoice_total: 39.98 })).toMatch(/lines add up to 38.98 with VAT, but invoice_total is 39.98/);
+    expect(await err({ ...fresh, lines: [{ code: "SVC-H", quantity: 1, price: 1, vat_percent: 22 }], invoice_total: 1.22 })).toMatch(/Svetovanje is not marked for purchasing/);
+    expect(await err({ ...fresh, lines: [{ code: "DOM", quantity: 1, price: 1, vat_percent: 9.5 }], invoice_total: 1.1 })).toMatch(/no tax code with 9.5 % VAT/);
+    expect(await err({ ...fresh, lines: [{ code: "DOM", quantity: 1, price: 1 }], invoice_total: 1.22 })).toMatch(/give vat_percent/);
+    expect(await err({ ...fresh, lines: [{ quantity: 1, price: 1, vat_percent: 22 }], invoice_total: 1.22 })).toMatch(/give product_id \(or code\) of the product this cost is booked to/);
+    expect(await err({ ...fresh, supplier_invoice_number: undefined })).toMatch(/Give supplier_invoice_number/);
+    expect(await err({ ...fresh, invoice_total: undefined })).toMatch(/Give invoice_total/);
+    expect(await err({ ...fresh, invoice_date: "2026-11-01" })).toMatch(/invoice_date is in the future/);
+    expect(await err({ ...fresh, doc_type: "purchase_bill_foreign" })).toMatch(/domestic partner: use doc_type purchase_bill_domestic/);
+
+    // Without a due date, the supplier's last invoice gives the term.
+    const { body } = await draft(client, { ...fresh, due_date: undefined, invoice_date: "2026-10-03" });
+    expect(body).toMatchObject({ due_date: "2026-10-04", due_from: "1 day, as on the supplier's last invoice 126-039951" });
+  });
+
+  it("leaves out a negative line, and says so on the invoice and in the summary", async () => {
+    const fake = metakocka({ partners: [FOREIGN_SUPPLIER] });
+    const { client } = await connect(fake, { write: write() });
+    const { body } = await draft(client, OPENAI);
+    expect(body.totals).toMatchObject({ gross: 187.7 });
+    expect(body.left_out).toEqual([{ description: "Unused time after 30 Sep 2026 (Domene)", net: -42.27, total: -42.27 }]);
+    expect(body.warnings[0]).toMatch(/^1 negative line\(s\) are left out/);
+    expect(body.summary).toMatch(/^Vnesi TUJI PREJETI RAČUN TYJI3TBO-0007 od OpenAI Ireland Limited \(IE3255131SH\)\n[^\n]+\n\nPostavke:/);
+    expect(body.summary).toMatch(
+      /\n⚠ NI VNESENO — dodaj ročno v Metakocki \(navedeno tudi v opombi računa\):\n {2}− Unused time after 30 Sep 2026 \(Domene\) −42,27 €\n/,
+    );
+    await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } });
+    const sent = fake.puts()[0]!.body;
+    expect(sent.product_list).toEqual([{ mk_id: "P7", code: "DOM", count_code: "7", amount: "1", price: "187.7", discount: "0", tax: "000", doc_desc: "Sep 30–Oct 30, 2026" }]);
+    expect(sent.notes).toBe("Ročno dodaj vrstice, ki jih API ne sprejme: Unused time after 30 Sep 2026 (Domene) −42,27 €");
+  });
+
+  it("attaches the supplier's file once saved, only when the server runs locally", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mk-att-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const pdf = join(dir, "racun.pdf");
+    await writeFile(pdf, "%PDF-1.1 test");
+    const attached: Body[] = [];
+    // add_attachment lives next to the API's base path, outside the fake's routes.
+    const withAttach = metakocka({ partners: [SUPPLIER] });
+    const original = withAttach.client.call.bind(withAttach.client);
+    withAttach.client.call = (async (endpoint: string, params: Body, options: unknown) => {
+      if (endpoint === "../add_attachment") {
+        attached.push(params);
+        return { opr_code: "0" };
+      }
+      return original(endpoint, params, options as never);
+    }) as typeof withAttach.client.call;
+
+    const remote = await connect(withAttach, { write: write(false) });
+    expect(parse((await draft(remote.client, { ...AVANT, attachment_path: pdf })).result)).toMatch(/only possible when the server runs on the user's computer/);
+
+    const { client } = await connect(withAttach, { write: write(true) });
+    expect(parse((await draft(client, { ...AVANT, attachment_path: "racun.pdf" })).result)).toMatch(/absolute path/);
+    expect(parse((await draft(client, { ...AVANT, attachment_path: join(dir, "x.exe") })).result)).toMatch(/only .pdf/);
+    const { body } = await draft(client, { ...AVANT, attachment_path: pdf });
+    expect(body.attachment).toBe("racun.pdf");
+    expect(body.summary).toMatch(/\nPriloga: racun.pdf$/);
+    const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
+    expect(r.warnings).toEqual([]);
+    expect(attached).toEqual([
+      { doc_type: "purchase_bill_domestic", mk_id: "OFFER1", attachment_list: [{ file_name: "racun.pdf", data_b64: Buffer.from("%PDF-1.1 test").toString("base64") }] },
+    ]);
+  });
+});
+
+describe("new partners and products", () => {
+  const ALL: WriteSettings = { docTypes: ["purchase_bill_domestic", "purchase_bill_foreign", "partner", "product"], confirm: "never", timeoutMs: 120_000 };
+  const SHOP = {
+    name: "Big Bang, d.o.o.",
+    street: "Šmartinska cesta 152",
+    post_number: "1000",
+    city: "Ljubljana",
+    tax_id: "SI42678013",
+    business_entity: true,
+    taxpayer: true,
+    role: "supplier",
+  };
+  const RADIO = { name: "Drobni inventar", code: "DI", unit: "kos", service: false, purchasing: true };
+
+  it("drafts a supplier from its invoice, saves it once, and it can be used right away", async () => {
+    const fake = metakocka();
+    const { client } = await connect(fake, { write: quiet(ALL) });
+    const before = await client.callTool({ name: "search_partners", arguments: { tax_number: "SI42678013" } });
+    expect(JSON.stringify(parse(before))).not.toContain("Big Bang");
+
+    const { body } = parseDraft(await client.callTool({ name: "draft_partner", arguments: SHOP }));
+    expect(body.summary).toBe(
+      ["Dodaj PARTNERJA Big Bang, d.o.o. (SI42678013)", "Šmartinska cesta 152, 1000 Ljubljana, Slovenija", "dobavitelj · pravna oseba · davčni zavezanec: da · tujina: ne"].join("\n"),
+    );
+    const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
+    expect(r).toMatchObject({ status: "created", mk_id: "NEWP1", address_id: "NEWP1A", warnings: [] });
+    const sent = fake.calls.find((c) => c.endpoint === "add_partner")!.body.partner;
+    expect(sent).toEqual({
+      business_entity: "true",
+      taxpayer: "true",
+      foreign_county: "false",
+      supplier: "true",
+      buyer: "false",
+      customer: "Big Bang, d.o.o.",
+      tax_id_number: "SI42678013",
+      street: "Šmartinska cesta 152",
+      post_number: "1000",
+      place: "Ljubljana",
+      country: "Slovenija",
+    });
+    // The cached "not found" is gone.
+    const after = await client.callTool({ name: "search_partners", arguments: { tax_number: "SI42678013" } });
+    expect(JSON.stringify(parse(after))).toContain("Big Bang");
+    // Saved once; the same tax number again is refused, with or without the SI prefix.
+    expect(parse((await client.callTool({ name: "draft_partner", arguments: { ...SHOP, tax_id: "42678013", name: "BigBang" } })))).toMatch(
+      /Big Bang, d.o.o. \(id NEWP1\) already has the tax number SI42678013/,
+    );
+  });
+
+  it("partners: refuses what is already there or incomplete, shows similar names", async () => {
+    const fake = metakocka({ partners: [partner(), partner({ mk_id: "P-BB", customer: "Big Bang trgovina", tax_id_number: "SI11111111" })] });
+    const { client } = await connect(fake, { write: quiet(ALL) });
+    const draftP = async (args: Record<string, unknown>) => parseDraft(await client.callTool({ name: "draft_partner", arguments: args }));
+    expect((await draftP({ ...SHOP, tax_id: undefined })).text).toMatch(/A company needs its tax_id/);
+    expect((await draftP({ ...SHOP, name: "ACME d.o.o.", tax_id: undefined, business_entity: false })).text).toMatch(/ACME d.o.o. \(id 400068941553\) is already in Metakocka/);
+    const { body } = await draftP(SHOP);
+    expect(body.warnings[0]).toMatch(/Similar partners already exist: Big Bang trgovina \(id P-BB\)/);
+    expect(body.summary).toMatch(/\n\n⚠ Podobni partnerji že obstajajo: Big Bang trgovina$/);
+    const foreign = await draftP({ ...SHOP, name: "OpenAI Ireland Limited", tax_id: "IE3255131SH", country: "Ireland", taxpayer: true });
+    expect(foreign.body.summary).toMatch(/tujina: da/);
+  });
+
+  it("drafts a product for purchasing, refuses a used code or name, and the catalogue sees it at once", async () => {
+    const fake = metakocka({ partners: [partner({ mk_id: "SUP", customer: "Big Bang, d.o.o." })] });
+    const { client } = await connect(fake, { write: quiet(ALL) });
+    const draftPr = async (args: Record<string, unknown>) => parseDraft(await client.callTool({ name: "draft_product", arguments: args }));
+    expect((await draftPr({ ...RADIO, code: "SVC-H" })).text).toMatch(/code SVC-H is already used by Svetovanje/);
+    expect((await draftPr({ ...RADIO, name: "svetovanje", code: "X" })).text).toMatch(/Svetovanje \(code SVC-H, id P1\) is already in Metakocka/);
+    expect((await draftPr({ ...RADIO, purchasing: false })).text).toMatch(/for purchasing, for sales, or both/);
+
+    const purchase = {
+      doc_type: "purchase_bill_domestic",
+      partner_id: "SUP",
+      supplier_invoice_number: "BB-1",
+      invoice_date: "2026-10-05",
+      due_days: 0,
+      invoice_total: 89.99,
+      lines: [{ code: "DI", quantity: 1, price: 73.76, vat_percent: 22, description: "Prenosni radio JBL Tuner 3" }],
+    };
+    // Before: the line's product is missing, and the error points to draft_product.
+    expect(parse((await draft(client, purchase)).result)).toMatch(/no product DI.*add it with draft_product/);
+
+    const { body } = await draftPr(RADIO);
+    expect(body.summary).toBe("Dodaj IZDELEK Drobni inventar (šifra DI)\nenota kos · blago · nabavni");
+    const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
+    expect(r).toMatchObject({ status: "created", mk_id: "NEWPR7" });
+    expect(fake.calls.find((c) => c.endpoint === "json/product_add")!.body).toMatchObject({
+      code: "DI",
+      name: "Drobni inventar",
+      unit: "kos",
+      service: "false",
+      sales: "false",
+      purchasing: "true",
+    });
+    // After: the catalogue (cached for the day) has it.
+    const { body: inv } = await draft(client, purchase);
+    expect(inv.totals).toMatchObject({ net: 73.76, tax: 16.23, gross: 89.99 });
+  });
+
+  it("only the tools that are turned on are there, and a missing partner points to draft_partner only then", async () => {
+    const recordsOnly = await connect(metakocka(), { write: quiet({ ...ALL, docTypes: ["partner"] }) });
+    const names = (await recordsOnly.client.listTools()).tools.map((t) => t.name);
+    expect(names).toEqual(expect.arrayContaining(["draft_partner", "commit_document"]));
+    expect(names).not.toContain("draft_document");
+    expect(names).not.toContain("draft_product");
+    expect(recordsOnly.client.getInstructions()).toMatch(/can create partners\. .*use draft_partner.*products are never created here/);
+
+    const withPartners = await connect(metakocka(), { write: quiet(ALL) });
+    const missing = { doc_type: "purchase_bill_domestic", partner_id: "NOPE", supplier_invoice_number: "1", invoice_date: "2026-10-01", invoice_total: 1, lines: [] };
+    expect(parse((await draft(withPartners.client, { ...missing, lines: [{ code: "DOM", quantity: 1, price: 1, vat_percent: 0 }] })).result)).toMatch(
+      /never creates partners.*add it with draft_partner/,
+    );
+    const without = await connect(metakocka(), { write: quiet({ ...ALL, docTypes: ["purchase_bill_domestic"] }) });
+    expect(parse((await draft(without.client, { ...missing, lines: [{ code: "DOM", quantity: 1, price: 1, vat_percent: 0 }] })).result)).not.toMatch(/draft_partner/);
+  });
+});
+
+function parseDraft(r: Awaited<ReturnType<Client["callTool"]>>) {
+  const body = parse(r);
+  return { body, text: typeof body === "string" ? body : JSON.stringify(body) };
+}
