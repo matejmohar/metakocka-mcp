@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "metakocka-mcp",
   "display_name": "Metakocka",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Ask Claude about your Metakocka ERP: documents, invoices, stock, products and partners. Read-only. Works in Slovenian and English (slovenščina in angleščina).",
   "long_description": "Connects Claude to your Metakocka ERP so you can ask questions about your business in plain language: who owes you money and how overdue they are, top products last month, stock in a warehouse, or the full detail of a sales order. This version is read-only: it cannot create, change or delete anything in Metakocka. Requests go directly from your computer to Metakocka's API. This is an independent community project, not made or endorsed by Metakocka d.o.o.",
   "author": {
