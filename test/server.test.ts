@@ -7,7 +7,11 @@ import { createMcpHandler } from "@modelcontextprotocol/server";
 import { afterEach, describe, expect, it } from "vitest";
 import type { MetakockaClient } from "../src/client.js";
 import { ConfigError, SETUP_HELP } from "../src/config.js";
-import { createServer } from "../src/server.js";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { TtlCache } from "../src/cache.js";
+import { createServer, type CreateServerOptions } from "../src/server.js";
 import { fakeMetakocka, filterValue, invoice, type Handler } from "./fake-metakocka.js";
 
 const NOW = new Date("2026-10-05T10:00:00Z");
@@ -18,8 +22,8 @@ afterEach(async () => {
   cleanup = undefined;
 });
 
-async function connect(getClient: () => MetakockaClient) {
-  const handler = createMcpHandler(() => createServer({ getClient, now: () => NOW }));
+async function connect(getClient: () => MetakockaClient, options: Partial<CreateServerOptions> = {}) {
+  const handler = createMcpHandler(() => createServer({ getClient, now: () => NOW, ...options }));
   const transport = new StreamableHTTPClientTransport(new URL("http://test.local/mcp"), {
     fetch: (url, init) => handler.fetch(new Request(url, init)),
   });
@@ -32,9 +36,9 @@ async function connect(getClient: () => MetakockaClient) {
   return client;
 }
 
-async function setup(handlers: Record<string, Handler>) {
+async function setup(handlers: Record<string, Handler>, options: Partial<CreateServerOptions> = {}) {
   const fake = fakeMetakocka(handlers);
-  const client = await connect(() => fake.client);
+  const client = await connect(() => fake.client, options);
   return { client, calls: fake.calls };
 }
 
@@ -56,11 +60,14 @@ const WAREHOUSES = {
 };
 
 describe("MCP server", () => {
-  it("lists all tools, every one read-only", async () => {
+  it("lists all tools; all read-only except the PDF tool, which only writes a local file", async () => {
     const { client } = await setup({});
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
+      "find_by_tracking_code",
+      "get_bank_statements",
       "get_document",
+      "get_document_pdf",
       "get_partner",
       "get_product",
       "get_stock",
@@ -78,9 +85,17 @@ describe("MCP server", () => {
       "stock_valuation",
     ]);
     for (const tool of tools) {
-      expect(tool.annotations?.readOnlyHint, tool.name).toBe(true);
+      expect(tool.annotations?.readOnlyHint, tool.name).toBe(tool.name !== "get_document_pdf");
+      expect(tool.annotations?.destructiveHint, tool.name).toBe(false);
       expect(tool.description, tool.name).toBeTruthy();
     }
+  });
+
+  it("lists the same tools as the .mcpb manifest", async () => {
+    const { client } = await setup({});
+    const { tools } = await client.listTools();
+    const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8")) as { tools: { name: string }[] };
+    expect(manifest.tools.map((t) => t.name).sort()).toEqual(tools.map((t) => t.name).sort());
   });
 
   it("lists prompts and resources", async () => {
@@ -161,6 +176,13 @@ describe("MCP server", () => {
       due_date: "2026-08-25",
       line_count: 1,
     });
+  });
+
+  it("search_documents treats 'No complaints found' as an empty result", async () => {
+    const { client } = await setup({ search: () => ({ opr_code: "6", opr_desc: "No complaints found" }) });
+    const result = await client.callTool({ name: "search_documents", arguments: { doc_type: "complaint" } });
+    expect(result.isError).toBeFalsy();
+    expect(json(result)).toMatchObject({ total_matching: 0, returned: 0, documents: [] });
   });
 
   it("rejects unpaid_only for non-invoice documents", async () => {
@@ -512,7 +534,7 @@ describe("MCP server", () => {
     expect(data.we_owe_them).toEqual({ open_invoices: 0, totals_by_currency: {} });
   });
 
-  it("partner_statement fetches the period and the older open documents", async () => {
+  it("partner_statement without payment dates fetches the period and the older open documents", async () => {
     const { client, calls } = await setup({
       get_partner: () => PARTNERS,
       search: (body) => {
@@ -524,10 +546,14 @@ describe("MCP server", () => {
         return { opr_code: "0", result_all_records: "1", result: docs };
       },
     });
-    const result = await client.callTool({ name: "partner_statement", arguments: { tax_number: "si 111" } });
+    const result = await client.callTool({
+      name: "partner_statement",
+      arguments: { tax_number: "si 111", include_payment_dates: false },
+    });
     expect(result.isError).toBeFalsy();
     const searches = calls.filter((c) => c.endpoint === "search");
     expect(searches).toHaveLength(6);
+    expect(searches.some((c) => "show_payment_detail" in c.body)).toBe(false);
     expect(filterValue(searches[0]!.body, "doc_date_from")).toBe("06.10.2025");
     expect(filterValue(searches[0]!.body, "doc_date_to")).toBe("05.10.2026");
     expect(filterValue(searches[3]!.body, "doc_date_to")).toBe("05.10.2025");
@@ -604,7 +630,12 @@ describe("MCP server", () => {
     const result = await client.callTool({ name: "stock_movements", arguments: { product_id: "P1" } });
     expect(result.isError).toBeFalsy();
     const searches = calls.filter((c) => c.endpoint === "search");
-    expect(searches.map((c) => c.body.doc_type)).toEqual(["warehouse_acceptance_note", "warehouse_packing_list", "transfer_order"]);
+    expect(searches.map((c) => c.body.doc_type)).toEqual([
+      "warehouse_acceptance_note",
+      "warehouse_packing_list",
+      "transfer_order",
+      "sales_bill_retail",
+    ]);
     expect(filterValue(searches[0]!.body, "doc_date_from")).toBe("07.07.2026");
     const data = json(result);
     expect(data).toMatchObject({ current_stock: 17, total_in: 20, total_out: 3, net_change: 17 });
@@ -624,6 +655,182 @@ describe("MCP server", () => {
     expect(await text("weekly-business-digest", { week_ending: "2026-10-04" })).toContain("7 days ending 2026-10-04");
     expect(await text("month-end-checklist", { month: "2026-09" })).toContain("purchase_summary");
     expect(await text("monthly-sales-report", { month: "2026-09" })).toContain("compare_to=previous_period");
+  });
+
+  it("partner_statement lists dated payments by default", async () => {
+    const { client, calls } = await setup({
+      get_partner: () => PARTNERS,
+      search: (body) => {
+        if (body.doc_type !== "sales_bill_domestic" || filterValue(body, "payment_status") === "false") {
+          return { opr_code: "0", result_all_records: "0", result: [] };
+        }
+        const doc = invoice({
+          count_code: "R-1",
+          doc_date: "2026-09-01+02:00",
+          duo_payment: "2026-09-15+02:00",
+          sum_all: "2440",
+          sum_paid: "2440",
+          mark_paid: [
+            { date: "2026-09-10+02:00", amount: "1.220", payment_type: "TRR" },
+            { date: "2026-09-20+02:00", amount: "1.220", payment_type: "TRR" },
+          ],
+        });
+        return { opr_code: "0", result_all_records: "1", result: [doc] };
+      },
+    });
+    const result = await client.callTool({ name: "partner_statement", arguments: { partner_id: "11" } });
+    expect(result.isError).toBeFalsy();
+    expect(calls.filter((c) => c.endpoint === "search").every((c) => c.body.show_payment_detail === "true")).toBe(true);
+    const data = json(result);
+    expect(data.entries.map((e: { entry: string; amount: number; running_balance: number }) => [e.entry, e.amount, e.running_balance])).toEqual([
+      ["invoice", 2440, 2440],
+      ["payment", -1220, 1220],
+      ["payment", -1220, 0],
+    ]);
+    expect(data.payment_behaviour).toMatchObject({ paid_invoices: 1, average_days_to_pay: 19, average_days_late: 5 });
+  });
+
+  it("sales_summary can look at one customer", async () => {
+    const { client, calls } = await setup({
+      get_partner: () => PARTNERS,
+      search: () => ({ opr_code: "0", result_all_records: "1", result: [invoice()] }),
+    });
+    const result = await client.callTool({
+      name: "sales_summary",
+      arguments: { date_from: "2026-09-01", date_to: "2026-09-30", partner_tax_number: "SI222", group_by: "product" },
+    });
+    expect(result.isError).toBeFalsy();
+    const searches = calls.filter((c) => c.endpoint === "search");
+    expect(searches.every((c) => filterValue(c.body, "partner_mk_id") === "22")).toBe(true);
+    expect(json(result).partner).toEqual({ id: "22", name: "Novak Trade d.o.o." });
+  });
+
+  it("caches warehouses and partner lookups between tool calls", async () => {
+    const cache = new TtlCache(60_000);
+    const { client, calls } = await setup(
+      {
+        "json/warehouse_list": () => WAREHOUSES,
+        "json/warehouse_stock": () => ({ opr_code: "0", stock_list: [] }),
+        get_partner: () => PARTNERS,
+      },
+      { cache },
+    );
+    await client.callTool({ name: "get_stock", arguments: { warehouse: "Maribor" } });
+    await client.callTool({ name: "list_warehouses", arguments: {} });
+    await client.callTool({ name: "get_partner", arguments: { partner_id: "11", include_balance: false } });
+    await client.callTool({ name: "get_partner", arguments: { partner_id: "11", include_balance: false } });
+    expect(calls.filter((c) => c.endpoint === "json/warehouse_list")).toHaveLength(1);
+    expect(calls.filter((c) => c.endpoint === "get_partner")).toHaveLength(1);
+  });
+
+  it("reports progress while reading many pages", async () => {
+    const { client } = await setup({
+      search: (body) => ({
+        opr_code: "0",
+        result_all_records: "150",
+        result: Array.from({ length: body.offset === 0 ? 100 : 50 }, () => invoice()),
+      }),
+    });
+    const messages: string[] = [];
+    await client.callTool(
+      { name: "sales_summary", arguments: { date_from: "2026-09-01", date_to: "2026-09-30", doc_types: ["sales_bill_domestic"] } },
+      { onprogress: (p) => messages.push(p.message ?? "") },
+    );
+    expect(messages).toEqual([
+      "2026-09-01 – 2026-09-30: read 100 of 150 sales_bill_domestic documents",
+      "2026-09-01 – 2026-09-30: read 150 of 150 sales_bill_domestic documents",
+    ]);
+  });
+
+  it("get_document_pdf saves an invoice as PDF and links to it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mk-pdf-"));
+    try {
+      const { client, calls } = await setup(
+        {
+          search: () => ({ opr_code: "0", result: [{ mk_id: "222", count_code: "1-MK-7" }] }),
+          report: () => new Response(new Uint8Array([0x25, 0x50, 0x44, 0x46]), { headers: { "Content-Type": "application/pdf" } }),
+        },
+        { pdfDir: dir },
+      );
+      const result = await client.callTool({ name: "get_document_pdf", arguments: { doc_type: "sales_bill_domestic", number: "1-MK-7" } });
+      expect(result.isError).toBeFalsy();
+      expect(calls[1]!.body).toMatchObject({ mk_id: "222", report_id: "38", params: [{ type: "REPORT_TYPE", value: "PDF" }] });
+      const path = join(dir, "sales_bill_domestic_1-MK-7.pdf");
+      expect(json(result)).toMatchObject({ saved_to: path, id: "222" });
+      expect((await readFile(path)).toString("latin1")).toBe("%PDF");
+      expect((result.content as { type: string }[])[1]).toMatchObject({ type: "resource_link", mimeType: "application/pdf" });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("get_document_pdf asks for a report_id for non-invoice documents", async () => {
+    const { client, calls } = await setup({});
+    const result = await client.callTool({ name: "get_document_pdf", arguments: { doc_type: "sales_offer", id: "1" } });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(/dump_for_report_rest/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("find_by_tracking_code returns the order", async () => {
+    const { client, calls } = await setup({
+      search_tracking_code: () => ({ opr_code: "0", mk_id: "400", count_code: "PP-1", buyer_order: "PP-1", tracking_code: "TC1" }),
+      get_document: () => invoice({ mk_id: "400", count_code: "PP-1", doc_type: "sales_order" }),
+    });
+    const result = await client.callTool({ name: "find_by_tracking_code", arguments: { tracking_code: "TC1" } });
+    expect(calls[0]!.body).toMatchObject({ tracking_code: "TC1" });
+    expect(calls[1]!.body).toMatchObject({ doc_type: "sales_order", doc_id: "400" });
+    expect(json(result)).toMatchObject({ order_id: "400", order_number: "PP-1", order: { count_code: "PP-1" } });
+  });
+
+  it("get_bank_statements sends dd.MM.yyyy dates and summarises transactions", async () => {
+    const { client, calls } = await setup({
+      "json/get_bank_statement": () => ({
+        opr_code: "0",
+        result: [
+          {
+            doc_date: "2026-09-10+02:00",
+            code: "34",
+            initial_state: "1000",
+            final_state: "1100",
+            currency: "EUR",
+            bank_account: "SI56",
+            transactions: [{ type: "Prejemek", partner: "ACME", amount: "100" }],
+          },
+        ],
+      }),
+    });
+    const result = await client.callTool({ name: "get_bank_statements", arguments: {} });
+    expect(calls[0]!.body).toMatchObject({ doc_date_from: "05.09.2026", doc_date_to: "05.10.2026" });
+    expect(json(result)).toMatchObject({
+      statements: 1,
+      accounts: [{ account: "SI56", money_in: 100, money_out: 0, closing: 1100 }],
+      transactions: [{ partner: "ACME", direction: "in", amount: 100 }],
+    });
+  });
+
+  it("stock_movements skips retail bills that were shipped with a packing list", async () => {
+    const { client } = await setup({
+      "json/product_list": () => ({ opr_code: "0", product_list: [{ count_code: "P1", amount: "5" }] }),
+      search: (body) => ({
+        opr_code: "0",
+        result:
+          body.doc_type === "sales_bill_retail"
+            ? [
+                { count_code: "MP-1", doc_date: "2026-09-01+02:00", product_list: [{ count_code: "P1", amount: "1" }] },
+                {
+                  count_code: "MP-2",
+                  doc_date: "2026-09-02+02:00",
+                  product_list: [{ count_code: "P1", amount: "4" }],
+                  doc_link_list: [{ doc_type: "warehouse_packing_list", count_code: "DOB-9" }],
+                },
+              ]
+            : [],
+      }),
+    });
+    const data = json(await client.callTool({ name: "stock_movements", arguments: { product_id: "P1" } }));
+    expect(data.movements.map((m: { number: string }) => m.number)).toEqual(["MP-1"]);
+    expect(data.total_out).toBe(1);
   });
 
   it("explains missing configuration instead of crashing", async () => {

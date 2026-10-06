@@ -1,7 +1,7 @@
 /** Pure calculations for the reporting tools (easy to unit-test). */
 import type { MkRecord } from "./api.js";
 import { daysBetween, fromMkDate } from "./dates.js";
-import { asArray, num, round2, str } from "./util.js";
+import { asArray, compact, num, numSl, round2, str } from "./util.js";
 
 export interface OpenInvoice {
   id?: string;
@@ -318,4 +318,187 @@ export function partnerStatement(docs: MkRecord[], olderOpenDocs: MkRecord[], to
   });
 
   return { opening_open_balance: opening, totals_by_currency: totals, closing_open_balance: balance, rows };
+}
+
+export interface Payment {
+  date?: string;
+  amount: number;
+  method?: string;
+  kind?: string;
+  /** No payment detail was returned; the date is when the document was fully paid, or its own date. */
+  date_estimated?: true;
+}
+
+/**
+ * The payments on one document, from mark_paid (search with paymentDetail).
+ * Amounts there are in Slovenian format; if they don't add up to sum_paid the
+ * other format is tried, and failing that the payment is reported as one
+ * lump sum without a reliable date.
+ */
+export function documentPayments(doc: MkRecord): Payment[] {
+  const paid = Math.abs(num(doc.sum_paid) ?? 0);
+  const raw = asArray<MkRecord>(doc.mark_paid);
+  const lumpSum = (): Payment[] =>
+    paid > 0 ? [{ date: fromMkDate(doc.sum_full_paid_when) ?? fromMkDate(doc.doc_date), amount: round2(paid), date_estimated: true }] : [];
+  if (!raw.length) return lumpSum();
+
+  const parse = (parseNumber: (v: unknown) => number | undefined) =>
+    raw.map((p) => ({
+      date: fromMkDate(p.date),
+      amount: round2(Math.abs(parseNumber(p.amount) ?? 0)),
+      method: str(p.payment_type),
+      kind: str(p.payment_tip),
+    }));
+  const total = (ps: Payment[]) => ps.reduce((s, p) => s + p.amount, 0);
+  for (const candidate of [parse(numSl), parse(num)]) {
+    if (!paid || Math.abs(total(candidate) - paid) <= 0.01) return candidate.map((p) => compact(p) as Payment);
+  }
+  return lumpSum();
+}
+
+export interface LedgerEntry {
+  date?: string;
+  entry: "invoice" | "credit_note" | "payment" | "refund";
+  number?: string;
+  type?: string;
+  due_date?: string;
+  currency: string;
+  /** What this entry adds to the balance: invoices +, credit notes and payments −, refunds +. */
+  amount: number;
+  method?: string;
+  date_estimated?: true;
+  running_balance: number;
+}
+
+/**
+ * A partner's statement of account with dated payments: invoices and credit
+ * notes on their dates, each payment on its own date, and a running balance
+ * of what is owed. The opening balance is what older, still unpaid documents
+ * were owed at the start of the period; payments after the period are left
+ * out, so the closing balance is the balance on `period.to`.
+ */
+export function partnerLedger(docs: MkRecord[], olderOpenDocs: MkRecord[], period: { from: string; to: string }, today: string) {
+  const sign = (doc: MkRecord) => (CREDIT_NOTE_TYPES.has(str(doc.doc_type) ?? "") ? -1 : 1);
+  const currencyOf = (doc: MkRecord) => str(doc.currency_code) ?? "EUR";
+  const opening: Record<string, number> = {};
+  const raw: Omit<LedgerEntry, "running_balance">[] = [];
+  let paymentsAfterPeriod = 0;
+
+  const addPayments = (doc: MkRecord, inPeriodOnly: boolean) => {
+    const s = sign(doc);
+    for (const p of documentPayments(doc)) {
+      const date = p.date ?? fromMkDate(doc.doc_date);
+      if (date && date > period.to) {
+        paymentsAfterPeriod++;
+        continue;
+      }
+      if (inPeriodOnly && date && date < period.from) continue; // already in the opening balance
+      raw.push(
+        compact({
+          date,
+          entry: s > 0 ? "payment" : "refund",
+          number: str(doc.count_code),
+          type: str(doc.doc_type),
+          currency: currencyOf(doc),
+          amount: round2(-s * p.amount),
+          method: p.method,
+          date_estimated: p.date_estimated,
+        }) as Omit<LedgerEntry, "running_balance">,
+      );
+    }
+  };
+
+  for (const doc of olderOpenDocs) {
+    const s = sign(doc);
+    const paidBefore = documentPayments(doc)
+      .filter((p) => (p.date ?? "") < period.from)
+      .reduce((sum, p) => sum + p.amount, 0);
+    const currency = currencyOf(doc);
+    opening[currency] = round2((opening[currency] ?? 0) + s * (Math.abs(num(doc.sum_all) ?? 0) - paidBefore));
+    addPayments(doc, true);
+  }
+
+  for (const doc of docs) {
+    const s = sign(doc);
+    raw.push(
+      compact({
+        date: fromMkDate(doc.doc_date),
+        entry: s > 0 ? "invoice" : "credit_note",
+        number: str(doc.count_code),
+        type: str(doc.doc_type),
+        due_date: fromMkDate(doc.duo_payment),
+        currency: currencyOf(doc),
+        amount: round2(s * Math.abs(num(doc.sum_all) ?? 0)),
+      }) as Omit<LedgerEntry, "running_balance">,
+    );
+    addPayments(doc, false);
+  }
+
+  const isDocument = (e: { entry: string }) => e.entry === "invoice" || e.entry === "credit_note";
+  raw.sort(
+    (a, b) =>
+      (a.date ?? "").localeCompare(b.date ?? "") ||
+      Number(isDocument(b)) - Number(isDocument(a)) || // documents before payments on the same day
+      (a.number ?? "").localeCompare(b.number ?? "", undefined, { numeric: true }),
+  );
+
+  const balance: Record<string, number> = { ...opening };
+  const totals: Record<string, { invoiced: number; credited: number; paid: number; refunded: number }> = {};
+  const entries: LedgerEntry[] = raw.map((e) => {
+    balance[e.currency] = round2((balance[e.currency] ?? 0) + e.amount);
+    const t = (totals[e.currency] ??= { invoiced: 0, credited: 0, paid: 0, refunded: 0 });
+    if (e.entry === "invoice") t.invoiced = round2(t.invoiced + e.amount);
+    else if (e.entry === "credit_note") t.credited = round2(t.credited - e.amount);
+    else if (e.entry === "payment") t.paid = round2(t.paid - e.amount);
+    else t.refunded = round2(t.refunded + e.amount);
+    return { ...e, running_balance: balance[e.currency]! };
+  });
+
+  // Still open today, across the period's documents and older open ones.
+  const openNow: Record<string, { open: number; overdue: number }> = {};
+  for (const doc of [...olderOpenDocs, ...docs]) {
+    const open = round2(sign(doc) * (Math.abs(num(doc.sum_all) ?? 0) - Math.abs(num(doc.sum_paid) ?? 0)));
+    if (open === 0) continue;
+    const o = (openNow[currencyOf(doc)] ??= { open: 0, overdue: 0 });
+    o.open = round2(o.open + open);
+    const due = fromMkDate(doc.duo_payment);
+    if (open > 0 && due && due < today) o.overdue = round2(o.overdue + open);
+  }
+
+  return {
+    opening_balance: opening,
+    totals_by_currency: totals,
+    closing_balance: balance,
+    open_today: openNow,
+    payment_behaviour: paymentBehaviour(docs),
+    entries,
+    ...(paymentsAfterPeriod ? { payments_after_period: paymentsAfterPeriod } : {}),
+  };
+}
+
+/** How quickly a partner pays: over invoices (not credit notes) that are fully paid with dated payments. */
+export function paymentBehaviour(docs: MkRecord[]) {
+  const daysToPay: number[] = [];
+  const daysLate: number[] = [];
+  for (const doc of docs) {
+    if (CREDIT_NOTE_TYPES.has(str(doc.doc_type) ?? "")) continue;
+    const total = Math.abs(num(doc.sum_all) ?? 0);
+    const payments = documentPayments(doc);
+    if (!total || payments.some((p) => p.date_estimated || !p.date)) continue;
+    if (Math.abs(payments.reduce((s, p) => s + p.amount, 0) - total) > 0.01) continue; // not fully paid
+    const lastPaid = payments.map((p) => p.date!).sort().at(-1)!;
+    const docDate = fromMkDate(doc.doc_date);
+    const due = fromMkDate(doc.duo_payment);
+    if (docDate) daysToPay.push(Math.max(0, daysBetween(docDate, lastPaid)));
+    if (due) daysLate.push(Math.max(0, daysBetween(due, lastPaid)));
+  }
+  if (!daysToPay.length) return undefined;
+  const avg = (xs: number[]) => Math.round((xs.reduce((s, x) => s + x, 0) / xs.length) * 10) / 10;
+  return compact({
+    paid_invoices: daysToPay.length,
+    average_days_to_pay: avg(daysToPay),
+    average_days_late: daysLate.length ? avg(daysLate) : undefined,
+    paid_late: daysLate.filter((d) => d > 0).length,
+    max_days_late: daysLate.length ? Math.max(...daysLate) : undefined,
+  });
 }

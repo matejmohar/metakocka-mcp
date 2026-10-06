@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { DEFAULT_BASE_URL, MetakockaClient } from "./client.js";
 
 export interface MetakockaConfig {
@@ -37,6 +40,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MetakockaConfi
     baseUrl: env.METAKOCKA_BASE_URL?.trim() || DEFAULT_BASE_URL,
     timeoutMs,
   };
+}
+
+/** How long lookups that rarely change (warehouses, partners) are cached. METAKOCKA_CACHE_SECONDS=0 turns it off. */
+export function cacheTtlMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.METAKOCKA_CACHE_SECONDS?.trim();
+  if (!raw) return 300_000;
+  const seconds = Number(raw);
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : 300_000;
+}
+
+/** Where get_document_pdf saves files: METAKOCKA_PDF_DIR, else ~/Downloads, else the temp folder. */
+export function pdfDirectory(env: NodeJS.ProcessEnv = process.env): string {
+  const configured = env.METAKOCKA_PDF_DIR?.trim();
+  if (configured) return configured;
+  const downloads = join(homedir(), "Downloads");
+  return existsSync(downloads) ? join(downloads, "Metakocka") : join(tmpdir(), "metakocka");
 }
 
 /**

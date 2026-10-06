@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
-import { listAllProducts, listProducts, listWarehouses, searchAcrossTypes } from "../api.js";
+import { listAllProducts, listProducts, searchAcrossTypes } from "../api.js";
 import { MetakockaError } from "../client.js";
 import { addDays, daysBetween, todayInLjubljana } from "../dates.js";
 import {
@@ -15,7 +15,16 @@ import {
 } from "../inventory.js";
 import { str } from "../util.js";
 import { isoDate } from "./documents.js";
-import { READ_ONLY, resolveWarehouse, run, truncationWarning, warehouseRef, type ToolContext } from "./shared.js";
+import {
+  cachedWarehouses,
+  progressReporter,
+  READ_ONLY,
+  resolveWarehouse,
+  run,
+  truncationWarning,
+  warehouseRef,
+  type ToolContext,
+} from "./shared.js";
 
 const warehouseArg = z
   .string()
@@ -35,7 +44,7 @@ const MOVEMENT_TYPES = Object.keys(MOVEMENT_DOC_TYPES) as [MovementDocType, ...M
 export function registerStockTools(server: McpServer, ctx: ToolContext): void {
   async function optionalWarehouse(wanted: string | undefined): Promise<WarehouseRef | undefined> {
     if (!wanted) return undefined;
-    return warehouseRef(resolveWarehouse(await listWarehouses(ctx.getClient()), wanted));
+    return warehouseRef(resolveWarehouse(await cachedWarehouses(ctx), wanted));
   }
 
   server.registerTool(
@@ -139,8 +148,9 @@ export function registerStockTools(server: McpServer, ctx: ToolContext): void {
       title: "Stock movements",
       description:
         "History of one product's stock (kartica artikla, gibanje zaloge) for a period: goods received (prevzemnice), shipped " +
-        "(dobavnice) and moved between warehouses (medskladiščnice), in date order with partner and warehouse, plus totals in and out " +
-        "and the current stock. Reads every warehouse document in the period, so keep the period short for busy companies.",
+        "(dobavnice), sold over the counter (maloprodajni računi) and moved between warehouses (medskladiščnice), in date order " +
+        "with partner and warehouse, plus totals in and out and the current stock. Reads every such document in the period, " +
+        "so keep the period short for busy companies.",
       inputSchema: z
         .object({
           product_id: z.string().optional().describe("Exact Metakocka product id (count_code)."),
@@ -152,15 +162,16 @@ export function registerStockTools(server: McpServer, ctx: ToolContext): void {
             .array(z.enum(MOVEMENT_TYPES))
             .min(1)
             .default([...MOVEMENT_TYPES])
-            .describe("Warehouse document types to read."),
+            .describe("Document types to read. Retail bills shipped with a packing list are counted once, by the packing list."),
           max_rows: z.number().int().min(1).max(1000).default(200).describe("How many movements to list (the most recent ones)."),
           max_documents: z.number().int().min(1).max(5000).default(1000).describe("Safety cap on documents fetched per type."),
         })
         .refine((a) => a.product_id || a.code, { message: "Provide product_id or code." }),
       annotations: READ_ONLY,
     },
-    async (args) =>
+    async (args, extra) =>
       run(async () => {
+        const progress = progressReporter(extra);
         const today = todayInLjubljana(ctx.now());
         const dateTo = args.date_to ?? today;
         const dateFrom = args.date_from ?? addDays(dateTo, -90);
@@ -187,6 +198,7 @@ export function registerStockTools(server: McpServer, ctx: ToolContext): void {
           args.doc_types,
           { dateFrom, dateTo },
           args.max_documents,
+          ({ docType, fetched, total }) => progress(`Read ${fetched}${total ? ` of ${total}` : ""} ${docType} documents`),
         );
         const result = stockMovements(documents, { productId: str(product.count_code), code: str(product.code) }, warehouse);
         const position = productStockPosition(product, warehouse);
@@ -203,8 +215,7 @@ export function registerStockTools(server: McpServer, ctx: ToolContext): void {
           movements: rows,
           ...(result.movements.length > rows.length ? { earlier_movements_not_listed: result.movements.length - rows.length } : {}),
           note:
-            "Retail bills and work orders that move stock directly are not included. Without a warehouse filter, " +
-            "transfers between warehouses do not change the total.",
+            "Work orders are not included. Without a warehouse filter, transfers between warehouses do not change the total.",
           ...truncationWarning(truncatedTypes, "shorten the period or raise max_documents"),
         };
       }),

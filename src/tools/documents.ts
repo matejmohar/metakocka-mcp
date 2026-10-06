@@ -1,18 +1,25 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   discoverSearchFilters,
+  findByTrackingCode,
   findDocumentIdByNumber,
   getDocument,
+  INVOICE_REPORT_ID,
+  printDocumentPdf,
   searchDocuments,
   type AdvancedFilter,
 } from "../api.js";
+import { pdfDirectory } from "../config.js";
 import { MetakockaError } from "../client.js";
 import { isIsoDate } from "../dates.js";
-import { DOC_TYPE_VALUES, isInvoiceType } from "../doc-types.js";
+import { DOC_TYPE_VALUES, INVOICE_TYPES, isInvoiceType } from "../doc-types.js";
 import { cleanDocument, summarizeDocument } from "../summarize.js";
-import { list } from "../util.js";
-import { READ_ONLY, run, type ToolContext } from "./shared.js";
+import { list, str } from "../util.js";
+import { READ_ONLY, run, type ToolContext, type ToolResult } from "./shared.js";
 
 export const docTypeSchema = z
   .enum(DOC_TYPE_VALUES)
@@ -27,6 +34,9 @@ export const isoDate = z
   .string()
   .refine(isIsoDate, "Use the format YYYY-MM-DD, e.g. 2026-09-30")
   .describe("Date as YYYY-MM-DD");
+
+/** Document types Metakocka prints with the standard invoice report (all bills, including credit notes). */
+const INVOICE_PDF_TYPES = new Set<string>([...INVOICE_TYPES, "sales_bill_credit_note", "purchase_bill_credit_note"]);
 
 export function registerDocumentTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool(
@@ -160,5 +170,93 @@ export function registerDocumentTools(server: McpServer, ctx: ToolContext): void
       annotations: READ_ONLY,
     },
     async (args) => run(() => discoverSearchFilters(ctx.getClient(), args.doc_type)),
+  );
+
+  server.registerTool(
+    "get_document_pdf",
+    {
+      title: "Get document PDF",
+      description:
+        "Print a document as PDF, exactly as Metakocka prints it, and save it on this computer (by default in Downloads/Metakocka). " +
+        "Returns the file path and a link to open it. Works for sales and purchase invoices out of the box; other document types " +
+        "need the report_id of their print-out. Saving a file does not change anything in Metakocka.",
+      inputSchema: z
+        .object({
+          doc_type: docTypeSchema,
+          id: z.string().optional().describe("Internal Metakocka id (mk_id / 'id' in search results)."),
+          number: z.string().optional().describe("Document number as shown in Metakocka, e.g. '1-MK-2344'."),
+          report_id: z
+            .string()
+            .regex(/^\d+$/)
+            .optional()
+            .describe(
+              "Metakocka print-out (report) id. Not needed for invoices. For other types, open the print-out in Metakocka, add " +
+                "'&dump_for_report_rest=true' to the address and use the report_id shown.",
+            ),
+        })
+        .refine((a) => a.id || a.number, { message: "Provide either id or number." }),
+      // Writes a local file, but never changes Metakocka.
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async (args): Promise<ToolResult> => {
+      let saved: { path: string; name: string } | undefined;
+      const result = await run(async () => {
+        const reportId = args.report_id ?? (INVOICE_PDF_TYPES.has(args.doc_type) ? INVOICE_REPORT_ID : undefined);
+        if (!reportId) {
+          throw new MetakockaError(
+            `${args.doc_type} needs a report_id: open its print-out in Metakocka, add '&dump_for_report_rest=true' to the ` +
+              "address and use the report_id shown there.",
+          );
+        }
+        const client = ctx.getClient();
+        const id = args.id ?? (await findDocumentIdByNumber(client, args.doc_type, args.number!));
+        if (!id) throw new MetakockaError(`No ${args.doc_type} with number "${args.number}" was found.`);
+
+        const bytes = await printDocumentPdf(client, id, reportId);
+        const dir = ctx.pdfDir ?? pdfDirectory();
+        const name = `${args.doc_type}_${(args.number ?? id).replace(/[^\p{L}\p{N}._-]+/gu, "-")}.pdf`;
+        const path = join(dir, name);
+        await mkdir(dir, { recursive: true });
+        await writeFile(path, bytes);
+        saved = { path, name };
+        return { saved_to: path, size_kb: Math.round(bytes.length / 102.4) / 10, doc_type: args.doc_type, id };
+      });
+      if (saved) {
+        result.content.push({ type: "resource_link", uri: pathToFileURL(saved.path).href, name: saved.name, mimeType: "application/pdf" });
+      }
+      return result;
+    },
+  );
+
+  server.registerTool(
+    "find_by_tracking_code",
+    {
+      title: "Find order by tracking code",
+      description:
+        "Find the sales order a parcel belongs to, by its tracking code, return tracking code or sticker number (številka " +
+        "pošiljke / nalepke). Returns the order number and, by default, the full order.",
+      inputSchema: z
+        .object({
+          tracking_code: z.string().optional().describe("Parcel tracking code or return tracking code."),
+          sticker_code: z.string().optional().describe("Sticker number / barcode, instead of the tracking code."),
+          include_order: z.boolean().default(true).describe("Also return the full sales order."),
+        })
+        .refine((a) => a.tracking_code || a.sticker_code, { message: "Provide tracking_code or sticker_code." }),
+      annotations: READ_ONLY,
+    },
+    async (args) =>
+      run(async () => {
+        const client = ctx.getClient();
+        const hit = await findByTrackingCode(client, { trackingCode: args.tracking_code, stickerCode: args.sticker_code });
+        const found = {
+          order_id: str(hit.mk_id),
+          order_number: str(hit.count_code),
+          customer_order_ref: str(hit.buyer_order),
+          tracking_code: str(hit.tracking_code),
+          return_tracking_code: str(hit.return_tracking_code),
+        };
+        if (!args.include_order || !found.order_id) return found;
+        return { ...found, order: cleanDocument(await getDocument(client, "sales_order", found.order_id)) };
+      }),
   );
 }

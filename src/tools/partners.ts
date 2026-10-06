@@ -1,15 +1,14 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
-import { agingReport, partnerStatement, toOpenInvoice, type OpenInvoice } from "../analytics.js";
+import { agingReport, partnerLedger, partnerStatement, toOpenInvoice, type OpenInvoice } from "../analytics.js";
 import { searchAcrossTypes, searchPartners, type AdvancedFilter, type MkRecord } from "../api.js";
-import type { MetakockaClient } from "../client.js";
 import { MetakockaError } from "../client.js";
 import { addDays, addMonths, daysBetween, todayInLjubljana } from "../dates.js";
 import type { DocType } from "../doc-types.js";
 import { summarizePartner } from "../summarize.js";
 import { str } from "../util.js";
 import { isoDate } from "./documents.js";
-import { READ_ONLY, run, truncationWarning, type ToolContext } from "./shared.js";
+import { progressReporter, READ_ONLY, run, truncationWarning, type ToolContext } from "./shared.js";
 
 const RECEIVABLE_TYPES = ["sales_bill_domestic", "sales_bill_foreign"] as const satisfies readonly DocType[];
 const PAYABLE_TYPES = ["purchase_bill_domestic", "purchase_bill_foreign"] as const satisfies readonly DocType[];
@@ -34,15 +33,17 @@ const normaliseTaxNumber = (v: unknown) => str(v)?.replace(/\s/g, "").toUpperCas
  * ask the user or retry with partner_id.
  */
 export async function resolvePartner(
-  client: MetakockaClient,
+  ctx: ToolContext,
   who: { partner_id?: string; tax_number?: string; name?: string },
 ): Promise<MkRecord> {
-  const found = await searchPartners(client, {
+  const query = {
     partnerId: who.partner_id,
     taxNumber: who.partner_id ? undefined : who.tax_number,
     name: who.partner_id || who.tax_number ? undefined : who.name,
     withDiscounts: true,
-  });
+  };
+  const client = ctx.getClient();
+  const found = await ctx.cache.getOrLoad(`partners:${JSON.stringify(query)}`, () => searchPartners(client, query));
   let matches = found;
   if (who.partner_id) matches = found.filter((p) => str(p.mk_id) === who.partner_id);
   else if (who.tax_number) matches = found.filter((p) => normaliseTaxNumber(p.tax_id_number) === normaliseTaxNumber(who.tax_number));
@@ -85,7 +86,7 @@ export function registerPartnerTools(server: McpServer, ctx: ToolContext): void 
     async (args) =>
       run(async () => {
         const client = ctx.getClient();
-        const partner = await resolvePartner(client, args);
+        const partner = await resolvePartner(ctx, args);
         const result: MkRecord = { partner: summarizePartner(partner) };
         if (!args.include_balance) return result;
 
@@ -119,10 +120,10 @@ export function registerPartnerTools(server: McpServer, ctx: ToolContext): void 
     {
       title: "Partner statement",
       description:
-        "Statement of account (kartica partnerja / izpis odprtih postavk) for one customer or supplier: every invoice and credit note " +
-        "in a period in date order, with amount, paid, still open, days overdue and a running open balance that starts from what was " +
-        "already open before the period. Totals per currency: invoiced, credited, paid, open, overdue. " +
-        "Use it before writing a payment reminder or reviewing a customer.",
+        "Statement of account (kartica partnerja / izpis odprtih postavk) for one customer or supplier: invoices and credit notes " +
+        "in a period and each payment on the date it was made, with a running balance that starts from what older unpaid " +
+        "documents still owed. Totals per currency (invoiced, credited, paid), what is open and overdue today, and payment " +
+        "behaviour (average days to pay, how often and how late). Use it before writing a payment reminder or reviewing a customer.",
       inputSchema: z
         .object({
           ...partnerIdentity,
@@ -136,13 +137,20 @@ export function registerPartnerTools(server: McpServer, ctx: ToolContext): void 
             .boolean()
             .default(true)
             .describe("Also count documents from before the period that are still unpaid."),
+          include_payment_dates: z
+            .boolean()
+            .default(true)
+            .describe(
+              "List each payment on its own date (on by default; costs nothing extra). " +
+                "false: one row per document with the amount paid so far.",
+            ),
           max_rows: z.number().int().min(1).max(500).default(100).describe("How many rows to list (the most recent ones). Totals always cover all."),
           max_documents: z.number().int().min(1).max(5000).default(1000).describe("Safety cap on documents fetched per type."),
         })
         .refine(hasIdentity, { message: IDENTITY_MESSAGE }),
       annotations: READ_ONLY,
     },
-    async (args) =>
+    async (args, extra) =>
       run(async () => {
         const today = todayInLjubljana(ctx.now());
         const dateTo = args.date_to ?? today;
@@ -150,38 +158,66 @@ export function registerPartnerTools(server: McpServer, ctx: ToolContext): void 
         if (daysBetween(dateFrom, dateTo) < 0) throw new MetakockaError("date_from must be on or before date_to.");
 
         const client = ctx.getClient();
-        const partner = await resolvePartner(client, args);
+        const progress = progressReporter(extra);
+        const partner = await resolvePartner(ctx, args);
         const types = STATEMENT_TYPES[args.side];
+        const onPage = ({ docType, fetched }: { docType: string; fetched: number }) => progress(`Read ${fetched} ${docType} documents`);
         const inPeriod = await searchAcrossTypes(
           client,
           types,
-          { dateFrom, dateTo, filters: [partnerFilter(partner)] },
+          { dateFrom, dateTo, filters: [partnerFilter(partner)], paymentDetail: args.include_payment_dates },
           args.max_documents,
+          onPage,
         );
         const older = args.include_opening_balance
           ? await searchAcrossTypes(
               client,
               types,
-              { dateTo: addDays(dateFrom, -1), filters: [partnerFilter(partner), { type: "payment_status", value: "false" }] },
+              {
+                dateTo: addDays(dateFrom, -1),
+                filters: [partnerFilter(partner), { type: "payment_status", value: "false" }],
+                paymentDetail: args.include_payment_dates,
+              },
               args.max_documents,
+              onPage,
             )
           : { documents: [], truncatedTypes: [] };
 
-        const statement = partnerStatement(inPeriod.documents, older.documents, today);
-        const rows = statement.rows.slice(-args.max_rows);
-        return {
+        const header = {
           partner: { id: str(partner.mk_id), name: str(partner.customer), tax_id: str(partner.tax_id_number) },
           side: args.side,
           period: { from: dateFrom, to: dateTo },
           as_of: today,
+        };
+        const warning = truncationWarning(
+          [...new Set([...inPeriod.truncatedTypes, ...older.truncatedTypes])],
+          "shorten the period or raise max_documents",
+        );
+
+        if (args.include_payment_dates) {
+          const ledger = partnerLedger(inPeriod.documents, older.documents, { from: dateFrom, to: dateTo }, today);
+          const entries = ledger.entries.slice(-args.max_rows);
+          return {
+            ...header,
+            ...ledger,
+            entries,
+            ...(ledger.entries.length > entries.length ? { earlier_entries_not_listed: ledger.entries.length - entries.length } : {}),
+            ...(ledger.entries.some((e) => e.date_estimated)
+              ? { note: "Entries with date_estimated had no payment detail; the date is when the document was fully paid." }
+              : {}),
+            ...warning,
+          };
+        }
+
+        const statement = partnerStatement(inPeriod.documents, older.documents, today);
+        const rows = statement.rows.slice(-args.max_rows);
+        return {
+          ...header,
           ...statement,
           rows,
           ...(statement.rows.length > rows.length ? { earlier_rows_not_listed: statement.rows.length - rows.length } : {}),
-          note: "Payments are shown per document (amount paid so far); Metakocka's search does not return payment dates.",
-          ...truncationWarning(
-            [...new Set([...inPeriod.truncatedTypes, ...older.truncatedTypes])],
-            "shorten the period or raise max_documents",
-          ),
+          note: "Payments are shown per document (amount paid so far). Set include_payment_dates to see when each was paid.",
+          ...warning,
         };
       }),
   );

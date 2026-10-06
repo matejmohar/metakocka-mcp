@@ -48,6 +48,14 @@
       "description": "One document in full, by id or number (e.g. PP-18495)."
     },
     {
+      "name": "get_document_pdf",
+      "description": "Save an invoice as PDF on this computer."
+    },
+    {
+      "name": "find_by_tracking_code",
+      "description": "The sales order behind a parcel tracking code."
+    },
+    {
       "name": "list_search_filters",
       "description": "Advanced search filters available for a document type."
     },
@@ -89,7 +97,7 @@
     },
     {
       "name": "partner_statement",
-      "description": "Statement of account with a running open balance."
+      "description": "Statement of account with dated payments and payment behaviour."
     },
     {
       "name": "get_unpaid_invoices",
@@ -102,6 +110,10 @@
     {
       "name": "purchase_summary",
       "description": "Spending on supplier invoices, grouped and optionally compared."
+    },
+    {
+      "name": "get_bank_statements",
+      "description": "Money in and out per bank account, with transactions."
     }
   ],
   "tools_generated": false,

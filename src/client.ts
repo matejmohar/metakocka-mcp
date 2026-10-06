@@ -49,6 +49,11 @@ export class MetakockaError extends Error {
 
 type Json = Record<string, unknown>;
 
+export interface BinaryResponse {
+  contentType: string;
+  bytes: Uint8Array;
+}
+
 export class MetakockaClient {
   private readonly companyId: string;
   private readonly secretKey: string;
@@ -83,19 +88,30 @@ export class MetakockaClient {
    * `call("json/product_list", {...})`. Credentials are added automatically.
    */
   call<T = Json>(endpoint: string, params: Json = {}, options: CallOptions = {}): Promise<T> {
-    const run = () => this.callWithRetries<T>(endpoint, params, options.idempotent ?? true);
+    return this.enqueue(() => this.withRetries(() => this.callOnce<T>(endpoint, params), options.idempotent ?? true));
+  }
+
+  /**
+   * Call an endpoint that answers with a file (e.g. `report` → PDF). An
+   * `application/json` answer is an error and is thrown like any other.
+   */
+  callBinary(endpoint: string, params: Json = {}): Promise<BinaryResponse> {
+    return this.enqueue(() => this.withRetries(() => this.callBinaryOnce(endpoint, params), true));
+  }
+
+  private enqueue<T>(run: () => Promise<T>): Promise<T> {
     const result = this.queue.then(run, run);
     // Keep the queue going whether this call succeeds or fails.
     this.queue = result.catch(() => undefined);
     return result;
   }
 
-  private async callWithRetries<T>(endpoint: string, params: Json, idempotent: boolean): Promise<T> {
+  private async withRetries<T>(once: () => Promise<T>, idempotent: boolean): Promise<T> {
     const attempts = idempotent ? this.maxRetries + 1 : 1;
     let lastError: unknown;
     for (let attempt = 1; attempt <= attempts; attempt++) {
       try {
-        return await this.callOnce<T>(endpoint, params);
+        return await once();
       } catch (error) {
         lastError = error;
         if (!isRetryable(error) || attempt === attempts) break;
@@ -106,6 +122,22 @@ export class MetakockaClient {
   }
 
   private async callOnce<T>(endpoint: string, params: Json): Promise<T> {
+    const response = await this.post(endpoint, params);
+    return this.parseJson<T>(endpoint, response, await response.text());
+  }
+
+  private async callBinaryOnce(endpoint: string, params: Json): Promise<BinaryResponse> {
+    const response = await this.post(endpoint, params);
+    const contentType = response.headers.get("content-type") ?? "application/octet-stream";
+    if (!response.ok || contentType.includes("json")) {
+      // parseJson throws for HTTP errors and opr_code ≠ 0; anything else is still not the file we asked for.
+      this.parseJson(endpoint, response, await response.text());
+      throw new MetakockaError(`Metakocka returned no file for ${endpoint}`);
+    }
+    return { contentType, bytes: new Uint8Array(await response.arrayBuffer()) };
+  }
+
+  private async post(endpoint: string, params: Json): Promise<Response> {
     const url = `${this.baseUrl}/${endpoint.replace(/^\/+/, "")}`;
     const body = JSON.stringify({ ...params, company_id: this.companyId, secret_key: this.secretKey });
 
@@ -128,8 +160,10 @@ export class MetakockaClient {
           : this.redact(error instanceof Error ? error.message : String(error));
       throw new NetworkError(`Could not reach Metakocka (${endpoint}): ${reason}`);
     }
+    return response;
+  }
 
-    const text = await response.text();
+  private parseJson<T>(endpoint: string, response: Response, text: string): T {
     if (!response.ok) {
       throw new MetakockaError(
         `Metakocka returned HTTP ${response.status} for ${endpoint}${text ? `: ${this.redact(text.slice(0, 300))}` : ""}`,

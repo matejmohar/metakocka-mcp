@@ -1,11 +1,12 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { agingReport, compareSummaries, salesSummary, toOpenInvoice, type OpenInvoice } from "../analytics.js";
-import { searchAcrossTypes, type MkRecord } from "../api.js";
+import { searchAcrossTypes, type AdvancedFilter, type MkRecord } from "../api.js";
 import { MetakockaError } from "../client.js";
 import { daysBetween, previousPeriod, samePeriodLastYear, todayInLjubljana } from "../dates.js";
 import { INVOICE_TYPES, PURCHASE_INVOICE_TYPES, SALES_INVOICE_TYPES, type DocType } from "../doc-types.js";
-import { READ_ONLY, run, truncationWarning, type ToolContext } from "./shared.js";
+import { resolvePartner } from "./partners.js";
+import { progressReporter, READ_ONLY, run, truncationWarning, type ToolContext } from "./shared.js";
 import { isoDate } from "./documents.js";
 
 const invoiceTypeSchema = z.enum(INVOICE_TYPES);
@@ -35,9 +36,10 @@ export function registerReportTools(server: McpServer, ctx: ToolContext): void {
       }),
       annotations: READ_ONLY,
     },
-    async (args) =>
+    async (args, extra) =>
       run(async () => {
         const client = ctx.getClient();
+        const progress = progressReporter(extra);
         const today = todayInLjubljana(ctx.now());
         const filters = [{ type: "payment_status", value: "false" }];
         if (args.partner_tax_number) filters.push({ type: "partner_tax_num", value: args.partner_tax_number });
@@ -47,6 +49,7 @@ export function registerReportTools(server: McpServer, ctx: ToolContext): void {
           args.doc_types,
           { dateFrom: args.date_from, dateTo: args.date_to, filters },
           args.max_documents,
+          ({ docType, fetched, total }) => progress(`Read ${fetched}${total ? ` of ${total}` : ""} ${docType} documents`),
         );
         let invoices = found.documents
           .map((d: MkRecord) => toOpenInvoice(d, today))
@@ -78,7 +81,8 @@ export function registerReportTools(server: McpServer, ctx: ToolContext): void {
       "Revenue (promet, prihodki) for a period from issued invoices: net and gross totals per currency, grouped by partner, product, " +
       "month or document type (top N). Use it for questions like 'top customers this year', 'best-selling products " +
       "last month' or 'monthly revenue in 2026'. Set compare_to to compare with the previous period or the same period last year " +
-      "in one call (change per group, and the customers or products that dropped the most). Credit notes are not subtracted.",
+      "in one call (change per group, and the customers or products that dropped the most). Pass a partner to see one customer " +
+      "only, e.g. with group_by=product for what they buy. Credit notes are not subtracted.",
     allowedTypes: [...SALES_INVOICE_TYPES, "sales_bill_prepaid"],
     defaultTypes: SALES_INVOICE_TYPES,
     partnerWord: "customer",
@@ -120,6 +124,12 @@ function registerSummaryTool(server: McpServer, ctx: ToolContext, spec: SummaryT
           .enum(["partner", "product", "month", "document_type"])
           .default("partner")
           .describe(`partner = ${spec.partnerWord}.`),
+        partner_id: z.string().optional().describe(`Only this ${spec.partnerWord} (Metakocka partner id).`),
+        partner_tax_number: z.string().optional().describe(`Only this ${spec.partnerWord}, by tax number.`),
+        partner_name: z
+          .string()
+          .optional()
+          .describe(`Only this ${spec.partnerWord}, by name (must match one partner). With group_by=product: what they buy.`),
         compare_to: z
           .enum(["none", "previous_period", "previous_year"])
           .default("none")
@@ -137,14 +147,28 @@ function registerSummaryTool(server: McpServer, ctx: ToolContext, spec: SummaryT
       }),
       annotations: READ_ONLY,
     },
-    async (args) =>
+    async (args, extra) =>
       run(async () => {
         if (daysBetween(args.date_from, args.date_to) < 0) {
           throw new MetakockaError("date_from must be on or before date_to.");
         }
         const client = ctx.getClient();
+        const progress = progressReporter(extra);
+        const filters: AdvancedFilter[] = [];
+        let partner: MkRecord | undefined;
+        if (args.partner_id || args.partner_tax_number || args.partner_name) {
+          partner = await resolvePartner(ctx, {
+            partner_id: args.partner_id,
+            tax_number: args.partner_tax_number,
+            name: args.partner_name,
+          });
+          filters.push({ type: "partner_mk_id", value: String(partner.mk_id) });
+        }
         const fetchPeriod = (from: string, to: string) =>
-          searchAcrossTypes(client, args.doc_types, { dateFrom: from, dateTo: to }, args.max_documents);
+          searchAcrossTypes(client, args.doc_types, { dateFrom: from, dateTo: to, filters }, args.max_documents, ({ docType, fetched, total }) =>
+            progress(`${from} – ${to}: read ${fetched}${total ? ` of ${total}` : ""} ${docType} documents`),
+          );
+        const partnerInfo = partner ? { partner: { id: String(partner.mk_id), name: partner.customer } } : {};
 
         const current = await fetchPeriod(args.date_from, args.date_to);
         const notes = {
@@ -156,6 +180,7 @@ function registerSummaryTool(server: McpServer, ctx: ToolContext, spec: SummaryT
         if (args.compare_to === "none") {
           return {
             period: { from: args.date_from, to: args.date_to },
+            ...partnerInfo,
             doc_types: args.doc_types,
             ...salesSummary(current.documents, args.group_by, args.top),
             ...notes,
@@ -171,6 +196,7 @@ function registerSummaryTool(server: McpServer, ctx: ToolContext, spec: SummaryT
         return {
           period: { from: args.date_from, to: args.date_to },
           compared_with: previousRange,
+          ...partnerInfo,
           doc_types: args.doc_types,
           ...compareSummaries(
             salesSummary(current.documents, args.group_by, Infinity),

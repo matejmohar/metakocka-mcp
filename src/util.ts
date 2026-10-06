@@ -21,6 +21,22 @@ export function num(value: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+/**
+ * Parse a number that is always in Slovenian format: "." groups thousands and
+ * "," is the decimal separator ("5.985" = 5985, "38,98" = 38.98). Payment
+ * amounts (mark_paid) come back like this, unlike most other fields, so num()
+ * would read "5.985" as 5.985.
+ */
+export function numSl(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== "string") return undefined;
+  const s = value.trim().replace(/\s/g, "");
+  if (!s) return undefined;
+  if (!/^-?[\d.]*(,\d*)?$/.test(s)) return num(s);
+  const n = Number(s.replace(/\./g, "").replace(",", "."));
+  return Number.isFinite(n) ? n : undefined;
+}
+
 export function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }

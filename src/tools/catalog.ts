@@ -1,10 +1,10 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
-import { getStock, listProducts, listWarehouses, searchPartners, type MkRecord } from "../api.js";
+import { getStock, listProducts, searchPartners, type MkRecord } from "../api.js";
 import { MetakockaError } from "../client.js";
 import { summarizePartner, summarizeProduct, summarizeProductDetail, summarizeWarehouse } from "../summarize.js";
 import { list, num, round2, str } from "../util.js";
-import { READ_ONLY, resolveWarehouse, run, type ToolContext } from "./shared.js";
+import { cachedWarehouses, READ_ONLY, resolveWarehouse, run, type ToolContext } from "./shared.js";
 
 export function registerCatalogTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool(
@@ -121,7 +121,7 @@ export function registerCatalogTools(server: McpServer, ctx: ToolContext): void 
     async (args) =>
       run(async () => {
         const client = ctx.getClient();
-        const warehouses = await listWarehouses(client);
+        const warehouses = await cachedWarehouses(ctx);
         const byId = new Map(warehouses.map((w) => [str(w.mk_id) ?? "", w]));
 
         const warehouseIds = args.warehouse
@@ -177,7 +177,7 @@ export function registerCatalogTools(server: McpServer, ctx: ToolContext): void 
       description: "All warehouses (skladišča) of the company, with id, mark, name and address.",
       annotations: READ_ONLY,
     },
-    async () => run(async () => (await listWarehouses(ctx.getClient())).map(summarizeWarehouse)),
+    async () => run(async () => (await cachedWarehouses(ctx)).map(summarizeWarehouse)),
   );
 
   server.registerTool(
