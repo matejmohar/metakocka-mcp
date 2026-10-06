@@ -361,7 +361,7 @@ describe("MCP server", () => {
             count_code: "WE0003085",
             business_entity: "false",
             partner_contact_list: [{ gsm: "051123456", email: "test@test.si" }],
-            partner_delivery_address_list: [{ address_type: "Račun", city: "Ljubljana", payment_due_days: "15" }],
+            partner_delivery_address_list: [{ mk_id: "400079138037", address_type: "Račun", city: "Ljubljana", payment_due_days: "15" }],
           },
         ],
       }),
@@ -374,7 +374,7 @@ describe("MCP server", () => {
       name: "BAJEC JANEZ",
       business_entity: false,
       contacts: [{ email: "test@test.si", mobile: "051123456" }],
-      addresses: [{ type: "Račun", city: "Ljubljana", payment_due_days: 15 }],
+      addresses: [{ id: "400079138037", type: "Račun", city: "Ljubljana", payment_due_days: 15 }],
     });
   });
 
