@@ -16,7 +16,7 @@ export function registerReportTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Unpaid invoices",
       description:
-        "Open (unpaid or partly paid) invoices with amount still owed, due date and days overdue, plus totals per currency, " +
+        "Open (unpaid or partly paid; neplačani / zapadli računi, terjatve, obveznosti) invoices with amount still owed, due date and days overdue, plus totals per currency, " +
         "an aging breakdown (not due, 1–30, 31–60, 61–90, 90+ days) and the partners who owe the most. " +
         "Defaults to issued sales invoices (receivables); pass purchase invoice types for payables.",
       inputSchema: z.object({
@@ -83,7 +83,7 @@ export function registerReportTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Sales summary",
       description:
-        "Revenue for a period from issued invoices: net and gross totals per currency, grouped by partner, product, " +
+        "Revenue (promet, prihodki) for a period from issued invoices: net and gross totals per currency, grouped by partner, product, " +
         "month or document type (top N). Use it for questions like 'top customers this year', 'best-selling products " +
         "last month' or 'monthly revenue in 2026'. Credit notes are not subtracted.",
       inputSchema: z.object({

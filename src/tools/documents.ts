@@ -34,7 +34,7 @@ export function registerDocumentTools(server: McpServer, ctx: ToolContext): void
     {
       title: "Search documents",
       description:
-        "Search Metakocka documents (offers, sales orders, invoices, purchase documents, warehouse documents, work orders) " +
+        "Search Metakocka documents (dokumenti: offers, sales orders, invoices, purchase documents, warehouse documents, work orders) " +
         "of one type. Returns a compact summary per document: number, date, partner, status, totals, amount paid, due date. " +
         "Use get_document for the full document with its line items. Results are paged (max 100 per call): " +
         "use next_offset to continue.",

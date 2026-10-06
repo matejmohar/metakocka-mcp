@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { listWarehouses } from "./api.js";
-import { DOCUMENT_TYPES } from "./doc-types.js";
+import { DOCUMENT_TYPES, EVERYDAY_TERMS } from "./doc-types.js";
 import { summarizeWarehouse } from "./summarize.js";
 import { describeError, type ToolContext } from "./tools/shared.js";
 
@@ -10,11 +10,11 @@ export function registerResources(server: McpServer, ctx: ToolContext): void {
     "metakocka://document-types",
     {
       title: "Metakocka document types",
-      description: "Document type codes used by this server, with their Slovenian names as shown in Metakocka.",
+      description: "Document type codes used by this server, with their Slovenian names as shown in Metakocka, and everyday Slovenian words mapped to the type they usually mean.",
       mimeType: "application/json",
     },
     async (uri) => ({
-      contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(DOCUMENT_TYPES, null, 2) }],
+      contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify({ types: DOCUMENT_TYPES, everyday_terms: EVERYDAY_TERMS }, null, 2) }],
     }),
   );
 

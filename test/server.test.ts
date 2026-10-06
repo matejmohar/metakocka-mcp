@@ -84,6 +84,21 @@ describe("MCP server", () => {
     expect(JSON.parse((contents[0] as { text: string }).text)[0]).toMatchObject({ name: "Glavno skladišče", main: true });
   });
 
+  it("prompts follow the requested language and the document-types resource maps everyday Slovenian terms", async () => {
+    const { client } = await setup({});
+    const text = async (name: string, args: Record<string, string>) =>
+      ((await client.getPrompt({ name, arguments: args })).messages[0]!.content as { text: string }).text;
+    expect(await text("monthly-sales-report", { month: "2026-09", language: "sl" })).toContain("Slovenian");
+    expect(await text("monthly-sales-report", { month: "2026-09" })).toContain("language the user writes in");
+    expect(await text("overdue-invoices", {})).toContain("reminders in Slovenian");
+    expect(await text("overdue-invoices", { language: "en" })).toContain("reminders in English");
+
+    const { contents } = await client.readResource({ uri: "metakocka://document-types" });
+    const doc = JSON.parse((contents[0] as { text: string }).text);
+    expect(doc.types.sales_order).toContain("Prodajno naročilo");
+    expect(doc.everyday_terms["dobavnica / odpremnica"]).toBe("warehouse_packing_list");
+  });
+
   it("search_documents builds filters and summarises results", async () => {
     const { client, calls } = await setup({
       search: () => ({
