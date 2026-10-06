@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agingReport, lineNetValue, salesSummary, toOpenInvoice } from "../src/analytics.js";
+import { agingReport, compareSummaries, lineNetValue, partnerStatement, salesSummary, toOpenInvoice } from "../src/analytics.js";
 import { invoice } from "./fake-metakocka.js";
 
 describe("toOpenInvoice", () => {
@@ -77,5 +77,52 @@ describe("salesSummary", () => {
     const r = salesSummary(docs, "product", 1);
     expect(r.groups).toEqual([{ product: "B2 – Gadget", currency: "EUR", documents: 1, net: 300, quantity: 3 }]);
     expect(r.groups_not_shown).toBe(2);
+  });
+});
+
+describe("compareSummaries", () => {
+  const now = [
+    invoice({ partner: { customer: "ACME d.o.o." }, sum_basic: "300", sum_all: "366" }),
+    invoice({ partner: { customer: "Beta" }, sum_basic: "50", sum_all: "61" }),
+  ];
+  const before = [
+    invoice({ partner: { customer: "ACME d.o.o." }, sum_basic: "200", sum_all: "244" }),
+    invoice({ partner: { customer: "Gamma" }, sum_basic: "400", sum_all: "488" }),
+  ];
+
+  it("adds previous values and change per group, and finds the biggest declines", () => {
+    const r = compareSummaries(salesSummary(now, "partner", Infinity), salesSummary(before, "partner", Infinity), 10);
+    if (!("biggest_declines" in r)) throw new Error("expected a per-group comparison");
+    expect(r.totals_by_currency.EUR).toMatchObject({ net: 350, previous_net: 600, change_net: -250, change_percent: -41.67 });
+    expect(r.groups[0]).toMatchObject({ partner: "ACME d.o.o.", net: 300, previous_net: 200, change_net: 100, change_percent: 50 });
+    expect(r.groups[1]).toMatchObject({ partner: "Beta", previous_net: 0, change_net: 50 });
+    expect(r.groups[1]!.change_percent).toBeUndefined();
+    expect(r.biggest_declines).toEqual([{ partner: "Gamma", currency: "EUR", net: 0, previous_net: 400, change_net: -400 }]);
+  });
+
+  it("shows months side by side", () => {
+    const r = compareSummaries(salesSummary(now, "month", Infinity), salesSummary(before, "month", Infinity), 10);
+    expect(r).toHaveProperty("previous_groups");
+  });
+});
+
+describe("partnerStatement", () => {
+  it("orders rows, subtracts credit notes and keeps a running open balance from the opening balance", () => {
+    const docs = [
+      invoice({ count_code: "R-2", doc_date: "2026-09-10+02:00", duo_payment: "2026-09-25+02:00", sum_all: "200", sum_paid: "50" }),
+      invoice({ count_code: "R-1", doc_date: "2026-09-01+02:00", sum_all: "122", sum_paid: "122" }),
+      invoice({ count_code: "D-1", doc_type: "sales_bill_credit_note", doc_date: "2026-09-15+02:00", sum_all: "-20" }),
+    ];
+    const older = [invoice({ count_code: "R-0", doc_date: "2026-05-01+02:00", sum_all: "100", sum_paid: "40" })];
+    const s = partnerStatement(docs, older, "2026-10-05");
+    expect(s.opening_open_balance).toEqual({ EUR: 60 });
+    expect(s.rows.map((r) => [r.number, r.amount, r.open, r.running_open_balance])).toEqual([
+      ["R-1", 122, 0, 60],
+      ["R-2", 200, 150, 210],
+      ["D-1", -20, -20, 190],
+    ]);
+    expect(s.rows[1]!.days_overdue).toBe(10);
+    expect(s.totals_by_currency.EUR).toEqual({ invoiced: 322, credited: 20, paid: 172, open: 130, overdue: 150 });
+    expect(s.closing_open_balance).toEqual({ EUR: 190 });
   });
 });

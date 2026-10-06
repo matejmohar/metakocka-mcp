@@ -120,6 +120,59 @@ export function summarizeProduct(p: MkRecord): MkRecord {
   });
 }
 
+/** summarizeProduct plus everything get_product asks Metakocka for. */
+export function summarizeProductDetail(p: MkRecord): MkRecord {
+  const reservedByWarehouse = new Map<string, number>();
+  for (const r of asArray<MkRecord>(p.reservation_detail)) {
+    const wh = str(r.warehouse_name) ?? str(r.warehouse_mark) ?? "?";
+    reservedByWarehouse.set(wh, round2((reservedByWarehouse.get(wh) ?? 0) + (num(r.amount) ?? 0)));
+  }
+  return compact({
+    ...summarizeProduct(p),
+    reserved_by_warehouse: reservedByWarehouse.size ? Object.fromEntries(reservedByWarehouse) : undefined,
+    incoming_orders: asArray<MkRecord>(p.order_in_delivery).map((o) =>
+      compact({
+        amount: num(o.expect_order_amount),
+        expected_date: fromMkDate(o.export_order_delivery_date), // sic
+        warehouse: str(o.warehouse_mark),
+      }),
+    ),
+    last_purchase_price: num(p.last_purchase_price),
+    minimal_order_quantity: num(p.minimal_order_quantity),
+    unit2: str(p.unit2),
+    unit_factor: num(p.unit_factor),
+    weight: num(p.weight),
+    gross_weight: num(p.gross_weight),
+    dimensions: [p.height, p.width, p.depth].some((v) => v !== undefined)
+      ? compact({ height: num(p.height), width: num(p.width), depth: num(p.depth) })
+      : undefined,
+    country_of_origin: str(p.country),
+    customs_code: str(p.customs_fee),
+    tracks: compact({
+      serial_numbers: bool(p.serial_numbers) || undefined,
+      lot_numbers: bool(p.lot_numbers) || undefined,
+      expiration_dates: bool(p.expiration_dates) || undefined,
+    }),
+    bill_of_materials: p.compound_type
+      ? compact({
+          type: str(p.compound_type) === "norm" ? "norm (normativ)" : "compound (kosovnica)",
+          components: asArray<MkRecord>(p.compounds).map((c) =>
+            compact({
+              product_id: str(c.product_count_code),
+              code: str(c.product_code),
+              name: str(c.product_title),
+              amount: num(c.amount),
+            }),
+          ),
+        })
+      : undefined,
+    extra_fields: asArray<MkRecord>(p.extra_column).length
+      ? Object.fromEntries(asArray<MkRecord>(p.extra_column).map((c) => [str(c.name) ?? "?", c.value]))
+      : undefined,
+    created: fromMkDate(p.created_ts),
+  });
+}
+
 export function summarizePartner(p: MkRecord): MkRecord {
   return compact({
     id: str(p.mk_id),

@@ -1,11 +1,11 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
-import { agingReport, salesSummary, toOpenInvoice, type OpenInvoice } from "../analytics.js";
-import { searchAllDocuments, type MkRecord } from "../api.js";
+import { agingReport, compareSummaries, salesSummary, toOpenInvoice, type OpenInvoice } from "../analytics.js";
+import { searchAcrossTypes, type MkRecord } from "../api.js";
 import { MetakockaError } from "../client.js";
-import { daysBetween, todayInLjubljana } from "../dates.js";
-import { INVOICE_TYPES, SALES_INVOICE_TYPES } from "../doc-types.js";
-import { READ_ONLY, run, type ToolContext } from "./shared.js";
+import { daysBetween, previousPeriod, samePeriodLastYear, todayInLjubljana } from "../dates.js";
+import { INVOICE_TYPES, PURCHASE_INVOICE_TYPES, SALES_INVOICE_TYPES, type DocType } from "../doc-types.js";
+import { READ_ONLY, run, truncationWarning, type ToolContext } from "./shared.js";
 import { isoDate } from "./documents.js";
 
 const invoiceTypeSchema = z.enum(INVOICE_TYPES);
@@ -42,17 +42,15 @@ export function registerReportTools(server: McpServer, ctx: ToolContext): void {
         const filters = [{ type: "payment_status", value: "false" }];
         if (args.partner_tax_number) filters.push({ type: "partner_tax_num", value: args.partner_tax_number });
 
-        let invoices: OpenInvoice[] = [];
-        const truncatedTypes: string[] = [];
-        for (const docType of args.doc_types) {
-          const result = await searchAllDocuments(
-            client,
-            { docType, dateFrom: args.date_from, dateTo: args.date_to, filters },
-            args.max_documents,
-          );
-          if (result.truncated) truncatedTypes.push(docType);
-          invoices.push(...result.documents.map((d: MkRecord) => toOpenInvoice(d, today)).filter((i) => i !== undefined));
-        }
+        const found = await searchAcrossTypes(
+          client,
+          args.doc_types,
+          { dateFrom: args.date_from, dateTo: args.date_to, filters },
+          args.max_documents,
+        );
+        let invoices = found.documents
+          .map((d: MkRecord) => toOpenInvoice(d, today))
+          .filter((i): i is OpenInvoice => i !== undefined);
 
         const minDays = Math.max(args.min_days_overdue, args.overdue_only ? 1 : 0);
         if (minDays > 0) invoices = invoices.filter((i) => i.days_overdue >= minDays);
@@ -68,35 +66,74 @@ export function registerReportTools(server: McpServer, ctx: ToolContext): void {
           ...(invoices.length > args.max_invoices_listed
             ? { invoices_not_listed: invoices.length - args.max_invoices_listed }
             : {}),
-          ...(truncatedTypes.length
-            ? {
-                warning: `More documents matched than max_documents for: ${truncatedTypes.join(", ")}. ` +
-                  "Totals are incomplete — narrow the date range or raise max_documents.",
-              }
-            : {}),
+          ...truncationWarning(found.truncatedTypes, "narrow the date range or raise max_documents"),
         };
       }),
   );
 
+  registerSummaryTool(server, ctx, {
+    name: "sales_summary",
+    title: "Sales summary",
+    description:
+      "Revenue (promet, prihodki) for a period from issued invoices: net and gross totals per currency, grouped by partner, product, " +
+      "month or document type (top N). Use it for questions like 'top customers this year', 'best-selling products " +
+      "last month' or 'monthly revenue in 2026'. Set compare_to to compare with the previous period or the same period last year " +
+      "in one call (change per group, and the customers or products that dropped the most). Credit notes are not subtracted.",
+    allowedTypes: [...SALES_INVOICE_TYPES, "sales_bill_prepaid"],
+    defaultTypes: SALES_INVOICE_TYPES,
+    partnerWord: "customer",
+  });
+
+  registerSummaryTool(server, ctx, {
+    name: "purchase_summary",
+    title: "Purchase summary",
+    description:
+      "Spending (nabava, stroški) for a period from received supplier invoices (prejeti računi): net and gross totals per currency, " +
+      "grouped by supplier (partner), product, month or document type (top N). Use it for 'biggest suppliers this year' or " +
+      "'what did we buy most last quarter'. Set compare_to to compare with the previous period or the same period last year. " +
+      "Credit notes are not subtracted.",
+    allowedTypes: [...PURCHASE_INVOICE_TYPES, "purchase_bill_prepaid"],
+    defaultTypes: PURCHASE_INVOICE_TYPES,
+    partnerWord: "supplier",
+  });
+}
+
+interface SummaryToolSpec {
+  name: string;
+  title: string;
+  description: string;
+  allowedTypes: readonly [DocType, ...DocType[]];
+  defaultTypes: readonly DocType[];
+  partnerWord: string;
+}
+
+function registerSummaryTool(server: McpServer, ctx: ToolContext, spec: SummaryToolSpec): void {
   server.registerTool(
-    "sales_summary",
+    spec.name,
     {
-      title: "Sales summary",
-      description:
-        "Revenue (promet, prihodki) for a period from issued invoices: net and gross totals per currency, grouped by partner, product, " +
-        "month or document type (top N). Use it for questions like 'top customers this year', 'best-selling products " +
-        "last month' or 'monthly revenue in 2026'. Credit notes are not subtracted.",
+      title: spec.title,
+      description: spec.description,
       inputSchema: z.object({
         date_from: isoDate.describe("Start of the period (inclusive), YYYY-MM-DD."),
         date_to: isoDate.describe("End of the period (inclusive), YYYY-MM-DD."),
-        group_by: z.enum(["partner", "product", "month", "document_type"]).default("partner"),
+        group_by: z
+          .enum(["partner", "product", "month", "document_type"])
+          .default("partner")
+          .describe(`partner = ${spec.partnerWord}.`),
+        compare_to: z
+          .enum(["none", "previous_period", "previous_year"])
+          .default("none")
+          .describe(
+            "previous_period: the period just before, of the same length (whole months map to whole months: Sep → Aug, Q3 → Q2). " +
+              "previous_year: the same dates one year earlier.",
+          ),
         doc_types: z
-          .array(invoiceTypeSchema)
+          .array(z.enum(spec.allowedTypes))
           .min(1)
-          .default([...SALES_INVOICE_TYPES])
-          .describe("Invoice types counted as sales."),
+          .default([...spec.defaultTypes])
+          .describe("Invoice types to count."),
         top: z.number().int().min(1).max(200).default(20).describe("How many groups to return (ignored for month)."),
-        max_documents: z.number().int().min(1).max(10000).default(3000).describe("Safety cap on documents fetched per type."),
+        max_documents: z.number().int().min(1).max(10000).default(3000).describe("Safety cap on documents fetched per type and period."),
       }),
       annotations: READ_ONLY,
     },
@@ -106,30 +143,45 @@ export function registerReportTools(server: McpServer, ctx: ToolContext): void {
           throw new MetakockaError("date_from must be on or before date_to.");
         }
         const client = ctx.getClient();
-        const docs: MkRecord[] = [];
-        const truncatedTypes: string[] = [];
-        for (const docType of args.doc_types) {
-          const result = await searchAllDocuments(
-            client,
-            { docType, dateFrom: args.date_from, dateTo: args.date_to },
-            args.max_documents,
-          );
-          if (result.truncated) truncatedTypes.push(docType);
-          docs.push(...result.documents);
-        }
-        return {
-          period: { from: args.date_from, to: args.date_to },
-          doc_types: args.doc_types,
-          ...salesSummary(docs, args.group_by, args.top),
+        const fetchPeriod = (from: string, to: string) =>
+          searchAcrossTypes(client, args.doc_types, { dateFrom: from, dateTo: to }, args.max_documents);
+
+        const current = await fetchPeriod(args.date_from, args.date_to);
+        const notes = {
           ...(args.group_by === "product"
             ? { note: "Product values are net of line discounts but before document-level discounts." }
             : {}),
-          ...(truncatedTypes.length
-            ? {
-                warning: `More documents matched than max_documents for: ${truncatedTypes.join(", ")}. ` +
-                  "Totals are incomplete — shorten the period or raise max_documents.",
-              }
-            : {}),
+        };
+
+        if (args.compare_to === "none") {
+          return {
+            period: { from: args.date_from, to: args.date_to },
+            doc_types: args.doc_types,
+            ...salesSummary(current.documents, args.group_by, args.top),
+            ...notes,
+            ...truncationWarning(current.truncatedTypes, "shorten the period or raise max_documents"),
+          };
+        }
+
+        const previousRange =
+          args.compare_to === "previous_period"
+            ? previousPeriod(args.date_from, args.date_to)
+            : samePeriodLastYear(args.date_from, args.date_to);
+        const previous = await fetchPeriod(previousRange.from, previousRange.to);
+        return {
+          period: { from: args.date_from, to: args.date_to },
+          compared_with: previousRange,
+          doc_types: args.doc_types,
+          ...compareSummaries(
+            salesSummary(current.documents, args.group_by, Infinity),
+            salesSummary(previous.documents, args.group_by, Infinity),
+            args.top,
+          ),
+          ...notes,
+          ...truncationWarning(
+            [...new Set([...current.truncatedTypes, ...previous.truncatedTypes])],
+            "shorten the period or raise max_documents",
+          ),
         };
       }),
   );

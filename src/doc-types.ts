@@ -51,6 +51,11 @@ export const SALES_INVOICE_TYPES = [
   "sales_bill_retail",
 ] as const satisfies readonly DocType[];
 
+export const PURCHASE_INVOICE_TYPES = [
+  "purchase_bill_domestic",
+  "purchase_bill_foreign",
+] as const satisfies readonly DocType[];
+
 export const INVOICE_TYPES = [
   "sales_bill_domestic",
   "sales_bill_foreign",

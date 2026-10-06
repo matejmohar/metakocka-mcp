@@ -91,6 +91,24 @@ export async function searchAllDocuments(
   return { documents, totalRecords, truncated };
 }
 
+/** searchAllDocuments for several document types, one after another. */
+export async function searchAcrossTypes(
+  client: MetakockaClient,
+  docTypes: readonly DocType[],
+  search: Omit<DocumentSearch, "docType" | "limit" | "offset">,
+  maxDocumentsPerType: number,
+): Promise<{ documents: MkRecord[]; truncatedTypes: DocType[] }> {
+  const documents: MkRecord[] = [];
+  const truncatedTypes: DocType[] = [];
+  for (const docType of docTypes) {
+    const result = await searchAllDocuments(client, { ...search, docType }, maxDocumentsPerType);
+    if (result.truncated) truncatedTypes.push(docType);
+    // Some doc types come back without doc_type on each record; callers rely on it.
+    documents.push(...result.documents.map((d) => (d.doc_type ? d : { ...d, doc_type: docType })));
+  }
+  return { documents, truncatedTypes };
+}
+
 export async function getDocument(
   client: MetakockaClient,
   docType: DocType,
@@ -128,8 +146,20 @@ export interface ProductQuery {
   category?: string;
   activeOnly?: boolean;
   salesOnly?: boolean;
+  /** Leave out services (products that are never on stock). */
+  goodsOnly?: boolean;
+  /** Match product_id / code / name exactly instead of partially. */
+  exact?: boolean;
   includeStock?: boolean;
   includePrices?: boolean;
+  /** Reservations per warehouse (reservation_detail). */
+  includeReservations?: boolean;
+  /** Ordered from suppliers but not yet received (order_in_delivery). */
+  includeIncoming?: boolean;
+  includeLastPurchasePrice?: boolean;
+  /** Bill of materials / norm (compounds). */
+  includeCompound?: boolean;
+  includeCategories?: boolean;
   limit?: number;
   offset?: number;
 }
@@ -145,10 +175,11 @@ export async function listProducts(
   if (q.productId) params.count_code = q.productId;
   else if (q.code) params.code = q.code;
   else if (q.name) params.title = q.name;
-  if (q.productId || q.code || q.name) params.search_with_like = true;
+  if ((q.productId || q.code || q.name) && !q.exact) params.search_with_like = true;
   if (q.category) params.category = q.category;
   if (q.activeOnly) params.active = "true";
   if (q.salesOnly) params.sales = "true";
+  if (q.goodsOnly) params.service = "false";
   if (q.includeStock) {
     params.return_warehause_stock = "true"; // sic — Metakocka's spelling
     params.return_free_amount = "true";
@@ -157,8 +188,30 @@ export async function listProducts(
     params.return_pricelist = "true";
     params.show_tax_factor = "true";
   }
+  if (q.includeReservations) params.return_warehouse_reservation = "true";
+  if (q.includeIncoming) params.return_expect_order_delivery_date = "true";
+  if (q.includeLastPurchasePrice) params.return_last_purchase_price = "true";
+  if (q.includeCompound) params.return_product_compound = "true";
+  if (q.includeCategories) params.return_category = "true";
   const response = await client.call("json/product_list", params);
   return { products: asArray<MkRecord>(response.product_list), offset, limit };
+}
+
+/** Every matching product up to `maxProducts`, 1000 per call. */
+export async function listAllProducts(
+  client: MetakockaClient,
+  q: Omit<ProductQuery, "limit" | "offset">,
+  maxProducts: number,
+): Promise<{ products: MkRecord[]; truncated: boolean }> {
+  const products: MkRecord[] = [];
+  while (products.length < maxProducts) {
+    const limit = Math.min(PRODUCT_PAGE_MAX, maxProducts - products.length);
+    const page = await listProducts(client, { ...q, limit, offset: products.length });
+    products.push(...page.products);
+    // product_list has no total count: a short page is the last one.
+    if (page.products.length < limit) return { products, truncated: false };
+  }
+  return { products, truncated: true };
 }
 
 export interface StockQuery {
@@ -192,10 +245,13 @@ export interface PartnerQuery {
   email?: string;
   phone?: string;
   partnerId?: string;
+  /** Include the partner's discounts per product category. */
+  withDiscounts?: boolean;
 }
 
 export async function searchPartners(client: MetakockaClient, q: PartnerQuery): Promise<MkRecord[]> {
   const params: MkRecord = {};
+  if (q.withDiscounts) params.show_partner_discount = "true";
   if (q.partnerId) params.partner_id = q.partnerId;
   if (q.name) params.partner_name = q.name;
   if (q.taxNumber) params.partner_tax_number = q.taxNumber;

@@ -22,9 +22,9 @@ describe("num", () => {
 });
 
 describe("dates", () => {
-  it("adds the Ljubljana offset, respecting summer time", () => {
-    expect(toMkDate("2026-01-15")).toBe("2026-01-15+01:00");
-    expect(toMkDate("2026-07-15")).toBe("2026-07-15+02:00");
+  it("formats search dates as dd.MM.yyyy", () => {
+    expect(toMkDate("2026-01-15")).toBe("15.01.2026");
+    expect(toMkDate("2026-07-05")).toBe("05.07.2026");
   });
 
   it("rejects invalid dates", () => {
