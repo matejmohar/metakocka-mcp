@@ -110,4 +110,18 @@ describe("MetakockaClient", () => {
   it("requires credentials", () => {
     expect(() => new MetakockaClient({ companyId: "", secretKey: "x" })).toThrow(MetakockaError);
   });
+
+  it("returns files from callBinary and turns a JSON answer into an error", async () => {
+    const pdf = new Uint8Array([0x25, 0x50, 0x44, 0x46]); // %PDF
+    const { client } = fakeMetakocka({
+      report: (body) =>
+        body.report_id === "38"
+          ? new Response(pdf, { status: 200, headers: { "Content-Type": "application/pdf" } })
+          : { opr_code: "6", opr_desc: "Paramether 'report_id' must be valid number." },
+    });
+    const file = await client.callBinary("report", { report_id: "38" });
+    expect(file.contentType).toBe("application/pdf");
+    expect([...file.bytes]).toEqual([...pdf]);
+    await expect(client.callBinary("report", {})).rejects.toThrow(/report_id' must be valid number/);
+  });
 });

@@ -34,6 +34,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:live": "vitest run --config vitest.live.config.ts",
     "inspect": "npx @modelcontextprotocol/inspector node dist/index.js",
     "prepublishOnly": "npm run typecheck && npm test && npm run build",
     "pack:mcpb": "node scripts/build-mcpb.mjs",

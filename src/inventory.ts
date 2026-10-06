@@ -166,12 +166,19 @@ export function stockValuation(products: MkRecord[], top: number, warehouse?: Wa
   };
 }
 
-/** Which way each warehouse document moves goods. */
+/** Which way each document moves goods. */
 export const MOVEMENT_DOC_TYPES = {
   warehouse_acceptance_note: "in",
   warehouse_packing_list: "out",
   transfer_order: "transfer",
+  // Over-the-counter sales take goods off stock directly, without a packing list.
+  sales_bill_retail: "out",
 } as const;
+
+/** A retail bill that was shipped with a packing list is already counted by that packing list. */
+function shippedWithPackingList(doc: MkRecord): boolean {
+  return asArray<MkRecord>(doc.doc_link_list).some((l) => str(l.doc_type) === "warehouse_packing_list");
+}
 
 export type MovementDocType = keyof typeof MOVEMENT_DOC_TYPES;
 
@@ -195,6 +202,7 @@ export function stockMovements(docs: MkRecord[], product: ProductRef, warehouse?
     const type = str(doc.doc_type) as MovementDocType | undefined;
     const direction = type ? MOVEMENT_DOC_TYPES[type] : undefined;
     if (!direction) continue;
+    if (type === "sales_bill_retail" && shippedWithPackingList(doc)) continue;
 
     const from = str(doc.warehouse_mark_from);
     const to = str(doc.warehouse_mark_to);

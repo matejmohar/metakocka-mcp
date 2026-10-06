@@ -4,7 +4,7 @@
  */
 import type { MkRecord } from "./api.js";
 import { fromMkDate } from "./dates.js";
-import { asArray, bool, compact, num, round2, str } from "./util.js";
+import { asArray, bool, compact, num, numSl, round2, str } from "./util.js";
 
 export interface DocumentSummary {
   id?: string;
@@ -60,9 +60,20 @@ export function cleanDocument(doc: MkRecord): MkRecord {
 }
 
 const NUMERIC_KEYS = /^(sum_.*|amount|price|price_with_tax|discount_value|free_amount|reserved_amount|weight)$/;
-const DATE_KEYS = /^(doc_date|duo_payment|service_to_date|date|valid_from|valid_to|exp_date|sum_full_paid_when|last_paid_date)$/;
+const DATE_KEYS = /^(doc_date|duo_payment|service_to_date|service_from_date|date|valid_from|valid_to|exp_date|sum_full_paid_when|last_paid_date)$/;
 
 function normalise(value: unknown, key = ""): unknown {
+  if (key === "mark_paid") {
+    // Payment amounts are in Slovenian format ("5.985" = 5985), unlike the rest of the document.
+    return asArray<MkRecord>(value).map((p) => ({ ...(normalise(p) as MkRecord), amount: numSl(p.amount) ?? p.amount }));
+  }
+  if (key === "additional_data" && typeof value === "string") {
+    try {
+      return normalise(JSON.parse(value));
+    } catch {
+      return value;
+    }
+  }
   if (Array.isArray(value)) return value.map((v) => normalise(v, key));
   if (value && typeof value === "object") {
     const out: MkRecord = {};
@@ -70,8 +81,9 @@ function normalise(value: unknown, key = ""): unknown {
     return out;
   }
   if (typeof value === "string") {
-    if (NUMERIC_KEYS.test(key)) return num(value) ?? value;
+    // Dates first: sum_full_paid_when matches both patterns.
     if (DATE_KEYS.test(key)) return fromMkDate(value) ?? value;
+    if (NUMERIC_KEYS.test(key)) return num(value) ?? value;
   }
   return value;
 }

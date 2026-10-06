@@ -1,8 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/server";
-import { listWarehouses } from "./api.js";
 import { DOCUMENT_TYPES, EVERYDAY_TERMS } from "./doc-types.js";
 import { summarizeWarehouse } from "./summarize.js";
-import { describeError, type ToolContext } from "./tools/shared.js";
+import { cachedWarehouses, describeError, type ToolContext } from "./tools/shared.js";
 
 export function registerResources(server: McpServer, ctx: ToolContext): void {
   server.registerResource(
@@ -29,7 +28,7 @@ export function registerResources(server: McpServer, ctx: ToolContext): void {
     async (uri) => {
       let text: string;
       try {
-        text = JSON.stringify((await listWarehouses(ctx.getClient())).map(summarizeWarehouse), null, 2);
+        text = JSON.stringify((await cachedWarehouses(ctx)).map(summarizeWarehouse), null, 2);
       } catch (error) {
         text = JSON.stringify({ error: describeError(error) });
       }

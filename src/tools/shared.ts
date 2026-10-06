@@ -1,4 +1,6 @@
-import type { MkRecord } from "../api.js";
+import type { ServerContext } from "@modelcontextprotocol/server";
+import { listWarehouses, type MkRecord } from "../api.js";
+import type { TtlCache } from "../cache.js";
 import type { MetakockaClient } from "../client.js";
 import { MetakockaError } from "../client.js";
 import { ConfigError } from "../config.js";
@@ -6,15 +8,47 @@ import type { WarehouseRef } from "../inventory.js";
 import { str } from "../util.js";
 
 export interface ToolContext {
+  /** Folder for files the tools save (PDFs). Defaults to pdfDirectory() from config.ts. */
+  pdfDir?: string;
   /** Throws ConfigError when credentials are missing. */
   getClient: () => MetakockaClient;
   /** Injected for tests. */
   now: () => Date;
+  /** Shared by all tools of one server; see cache.ts. */
+  cache: TtlCache;
+}
+
+/** Warehouses change rarely and several tools need them to resolve names. */
+export function cachedWarehouses(ctx: ToolContext): Promise<MkRecord[]> {
+  const client = ctx.getClient();
+  return ctx.cache.getOrLoad("warehouses", () => listWarehouses(client));
+}
+
+/** Called after each page fetched from Metakocka, with a short description of what's being read. */
+export type ReportProgress = (message: string) => void;
+
+/**
+ * Progress notifications for long tool calls (many pages, several document
+ * types). Clients ask for them by sending a progressToken; otherwise this does nothing.
+ */
+export function progressReporter(extra: Pick<ServerContext, "mcpReq"> | undefined): ReportProgress {
+  const token = extra?.mcpReq._meta?.progressToken;
+  if (token === undefined) return () => {};
+  let step = 0;
+  return (message) => {
+    step++;
+    extra!.mcpReq
+      .notify({ method: "notifications/progress", params: { progressToken: token, progress: step, message } })
+      .catch(() => {}); // progress is best-effort; never fail the tool over it
+  };
 }
 
 export interface ToolResult {
   [key: string]: unknown;
-  content: { type: "text"; text: string }[];
+  content: (
+    | { type: "text"; text: string }
+    | { type: "resource_link"; uri: string; name: string; mimeType?: string; description?: string }
+  )[];
   isError?: boolean;
 }
 

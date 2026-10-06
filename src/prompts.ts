@@ -99,7 +99,8 @@ export function registerPrompts(server: McpServer): void {
           "Draft one e-mail per customer listing every overdue invoice (number, date, due date, amount still open) and the total. " +
           "Match the tone to the most overdue invoice: up to 14 days a friendly reminder, 15–45 days a firm second reminder, " +
           "over 45 days a final reminder that asks them to pay or get in touch within 8 days. " +
-          "Mention open credit notes if they have any. Don't threaten legal steps unless I ask. " +
+          "Mention open credit notes if they have any. If payment_behaviour shows they usually pay on time, say so kindly. " +
+          "Don't threaten legal steps unless I ask. " +
           `Write the e-mails in ${language === "en" ? "English" : "Slovenian"}. Do not send anything.`,
       ),
   );
@@ -118,10 +119,11 @@ export function registerPrompts(server: McpServer): void {
       userMessage(
         `Review the customer "${customer}" in Metakocka.\n` +
           "1. get_partner: contact details, payment terms, discounts and current open balance.\n" +
-          "2. partner_statement for the last 12 months, and again for the 12 months before that " +
-          "(include_opening_balance=false), to compare how much they bought.\n" +
-          "3. search_documents for their sales orders and offers of the last 3 months (by partner_tax_number when they have one).\n" +
-          "Write a short review: who they are, revenue now vs. a year ago, payment behaviour (overdue invoices, how late), " +
+          "2. sales_summary for the last 12 months for this customer (partner_id from step 1), group_by=product, " +
+          "compare_to=previous_year: what they buy and how that changed.\n" +
+          "3. partner_statement for the last 12 months: payment_behaviour (how many days they take to pay, how late) and what is open.\n" +
+          "4. search_documents for their sales orders and offers of the last 3 months (by partner_tax_number when they have one).\n" +
+          "Write a short review: who they are, revenue now vs. a year ago and their main products, payment behaviour, " +
           "open orders and offers, and two or three suggestions (e.g. follow up an offer, tighten payment terms). " +
           languageLine(language),
       ),
@@ -147,9 +149,11 @@ export function registerPrompts(server: McpServer): void {
           "1. sales_summary for those 7 days with compare_to=previous_period, grouped by partner.\n" +
           "2. search_documents for sales orders and sales offers dated in those 7 days (limit 1, just to read total_matching).\n" +
           "3. get_unpaid_invoices with overdue_only=true.\n" +
-          "4. low_stock.\n" +
-          "Write a one-page digest with four short sections: sales (vs. the week before, top customers), new orders and offers, " +
-          "money owed (total overdue, biggest debtors), and stock to reorder. End with the three things that need attention first. " +
+          "4. get_bank_statements for the same 7 days (skip this section if there are no statements).\n" +
+          "5. low_stock.\n" +
+          "Write a one-page digest with five short sections: sales (vs. the week before, top customers), new orders and offers, " +
+          "money in and out, money owed (total overdue, biggest debtors), and stock to reorder. " +
+          "End with the three things that need attention first. " +
           languageLine(language),
       ),
   );

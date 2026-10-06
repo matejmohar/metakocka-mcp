@@ -13,7 +13,8 @@ Connect it to Claude (or any MCP-capable assistant) and ask questions about your
 - *"What do we need to reorder, and what is already on the way?"*
 - *"How did our September sales compare with last September, and which customers dropped off?"*
 
-> **Read-only.** This version cannot create, change or delete anything in Metakocka.
+> **Read-only.** This version cannot create, change or delete anything in Metakocka. The only thing it writes is a PDF
+> on your own computer, when you ask for one.
 
 > This is an independent community project. It is not made or endorsed by Metakocka d.o.o.
 
@@ -38,24 +39,27 @@ vir `metakocka://document-types` pa vsebuje tudi vsakdanje izraze. Vsi pozivi (n
 |---|---|
 | **Documents** | |
 | `search_documents` | Find offers, sales orders, invoices, purchase and warehouse documents, work orders. Filter by date, partner tax number, status, unpaid, products. |
-| `get_document` | One document in full (line items, totals, payments, linked documents), by id or by its number, e.g. `PP-18495`. |
+| `get_document` | One document in full (line items, totals, payments, linked documents), by id or by its number, e.g. `PP-18495`. Also complaints (reklamacije). |
+| `get_document_pdf` | Save an invoice (or any document, given its print-out's report id) as PDF on your computer, as Metakocka prints it. |
+| `find_by_tracking_code` | The sales order behind a parcel tracking code, return tracking code or sticker number. |
 | `list_search_filters` | Which advanced Metakocka search filters exist for a document type. |
 | **Products and stock** | |
 | `search_products` | Product catalogue search by name / code, with optional stock per warehouse and price-list prices. |
 | `get_product` | One product in full: stock, reserved and free per warehouse, incoming supplier orders, prices, last purchase price, bill of materials. |
 | `get_stock` | Stock, reserved and free amounts per product and warehouse. |
 | `low_stock` | What to reorder: products out of stock, below safety stock or a minimum, or over-reserved, with incoming orders and a suggested order quantity. |
-| `stock_movements` | One product's stock history (goods received, shipped, transferred) for a period. |
+| `stock_movements` | One product's stock history (goods received, shipped, sold over the counter, transferred) for a period. |
 | `stock_valuation` | Estimated stock value per warehouse at last purchase prices, and the most valuable products. |
 | `list_warehouses` | All warehouses. |
 | **Partners** | |
 | `search_partners` | Customers and suppliers by name, tax number, e-mail or phone. |
 | `get_partner` | One partner in full, with what they owe us and what we owe them (open, overdue, aging). |
-| `partner_statement` | Statement of account: every invoice and credit note in a period with a running open balance. |
+| `partner_statement` | Statement of account: invoices, credit notes and dated payments with a running balance, plus how quickly they pay. |
 | **Reports** | |
 | `get_unpaid_invoices` | Open receivables (or payables): amounts owed, days overdue, aging buckets, top debtors. |
-| `sales_summary` | Revenue for a period, grouped by partner, product, month or document type; optionally compared with the previous period or last year. |
-| `purchase_summary` | Spending on supplier invoices, with the same grouping and comparison. |
+| `sales_summary` | Revenue for a period, grouped by partner, product, month or document type; optionally for one customer and compared with the previous period or last year. |
+| `purchase_summary` | Spending on supplier invoices, with the same grouping, partner filter and comparison. |
+| `get_bank_statements` | Money in and out per bank account, top partners, and the individual transactions. |
 
 ### Prompts
 
@@ -141,12 +145,15 @@ if something is wrong, and tells you if a newer version exists.
 | `METAKOCKA_SECRET_KEY` | yes | |
 | `METAKOCKA_BASE_URL` | no | `https://main.metakocka.si/rest/eshop/v1` |
 | `METAKOCKA_TIMEOUT_MS` | no | `30000` |
+| `METAKOCKA_CACHE_SECONDS` | no | `300` — how long warehouses and partner lookups are reused; `0` turns caching off |
+| `METAKOCKA_PDF_DIR` | no | `Downloads/Metakocka` — where `get_document_pdf` saves files |
 
 ## How it works
 
 - Every request goes directly from your computer to Metakocka's API. Nothing passes through a third-party server.
 - Requests are sent one at a time (Metakocka processes searches per company sequentially anyway) and
-  retried automatically on network errors and temporary server errors.
+  retried automatically on network errors and temporary server errors. Warehouses and partner lookups are cached
+  for a few minutes, and long reports send progress updates to clients that show them.
 - Responses are trimmed to the useful fields and numbers/dates are normalised, so the assistant uses less context
   and makes fewer mistakes.
 - Dates are `YYYY-MM-DD` in the Europe/Ljubljana time zone.
@@ -157,6 +164,7 @@ if something is wrong, and tells you if a newer version exists.
 ```sh
 npm install
 npm test            # unit + end-to-end tests against a fake Metakocka API
+npm run test:live   # read-only checks against your real Metakocka company (credentials from .env)
 npm run typecheck
 npm run build
 npm run inspect     # open the MCP Inspector against the built server
@@ -171,8 +179,10 @@ src/
   client.ts       HTTP client: auth, retries, timeouts, error handling
   api.ts          Metakocka operations (search, get_document, product_list, …)
   summarize.ts    raw Metakocka records → compact, typed objects
-  analytics.ts    aging, sales, period comparison and partner statement calculations
+  cache.ts        short-lived cache for warehouses and partner lookups
+  analytics.ts    aging, sales, period comparison, partner statement and payment calculations
   inventory.ts    low stock, stock valuation and stock movement calculations
+  bank.ts         bank statement calculations
   tools/          MCP tool definitions
   prompts.ts      MCP prompts
   resources.ts    MCP resources
@@ -189,6 +199,10 @@ git push --follow-tags # the Release workflow builds the .mcpb, creates the GitH
 
 npm publishing needs an `NPM_TOKEN` repository secret; without it the workflow still publishes the `.mcpb`.
 
+The **Live API check** workflow runs `npm run test:live` every morning against a real Metakocka company, to catch API
+changes on Metakocka's side. It needs the `METAKOCKA_COMPANY_ID` and `METAKOCKA_SECRET_KEY` repository secrets (use a
+test company); without them it is skipped.
+
 Metakocka's API reference: [github.com/metakocka/metakocka_api_base](https://github.com/metakocka/metakocka_api_base).
 
 ## Roadmap
@@ -197,7 +211,7 @@ Metakocka's API reference: [github.com/metakocka/metakocka_api_base](https://git
 - [x] One-click Claude Desktop extension (`.mcpb`)
 - [x] Partner detail and statements, product detail, low stock, stock movements and valuation, purchase summary, period comparison
 - [ ] Opt-in write tools (create offers and sales orders, change order status) with previews before anything is saved
-- [ ] PDF export of documents
+- [x] PDF export of invoices, bank statements, payment dates, tracking codes, live API check
 - [ ] Hosted version: connect from Claude or ChatGPT without installing anything
 
 ## Need help?

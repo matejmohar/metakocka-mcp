@@ -2,7 +2,7 @@
  * Domain-level operations on top of MetakockaClient. Tools call these; they
  * know Metakocka's endpoint names, paging rules and response shapes.
  */
-import type { MetakockaClient } from "./client.js";
+import { MetakockaError, type MetakockaClient } from "./client.js";
 import type { DocType } from "./doc-types.js";
 import { toMkDate } from "./dates.js";
 import { asArray, num, str } from "./util.js";
@@ -20,9 +20,14 @@ export interface DocumentSearch {
   dateFrom?: string; // YYYY-MM-DD
   dateTo?: string; // YYYY-MM-DD
   filters?: AdvancedFilter[];
+  /** Invoices: include each payment with its date (mark_paid). Costs nothing extra. */
+  paymentDetail?: boolean;
   limit?: number; // max 100 per Metakocka call
   offset?: number;
 }
+
+/** Called after every page fetched by the multi-page searches, e.g. to report progress. */
+export type OnPage = (info: { docType: DocType; fetched: number; total: number | undefined }) => void;
 
 export interface SearchPage {
   totalRecords: number | undefined;
@@ -46,14 +51,23 @@ export async function searchDocuments(client: MetakockaClient, search: DocumentS
   const limit = Math.min(Math.max(search.limit ?? 25, 1), SEARCH_PAGE_MAX);
   const offset = Math.max(search.offset ?? 0, 0);
   const filters = buildSearchFilters(search);
-  const response = await client.call("search", {
-    doc_type: search.docType,
-    result_type: "doc",
-    limit,
-    offset,
-    ...(search.query ? { query: search.query } : {}),
-    ...(filters.length ? { query_advance: filters } : {}),
-  });
+  const response = await client
+    .call("search", {
+      doc_type: search.docType,
+      result_type: "doc",
+      limit,
+      offset,
+      ...(search.query ? { query: search.query } : {}),
+      ...(filters.length ? { query_advance: filters } : {}),
+      ...(search.paymentDetail ? { show_payment_detail: "true" } : {}),
+    })
+    .catch((error: unknown) => {
+      // Complaint searches answer "No complaints found" (opr_code 6) instead of an empty result.
+      if (error instanceof MetakockaError && error.oprCode === "6" && /no \w+ found/i.test(error.message)) {
+        return { result_all_records: "0", result: [] } as MkRecord;
+      }
+      throw error;
+    });
   return {
     totalRecords: num(response.result_all_records),
     offset,
@@ -69,6 +83,7 @@ export async function searchAllDocuments(
   client: MetakockaClient,
   search: Omit<DocumentSearch, "limit" | "offset">,
   maxDocuments: number,
+  onPage?: OnPage,
 ): Promise<{ documents: MkRecord[]; totalRecords: number | undefined; truncated: boolean }> {
   const documents: MkRecord[] = [];
   let totalRecords: number | undefined;
@@ -82,6 +97,7 @@ export async function searchAllDocuments(
     totalRecords = page.totalRecords ?? totalRecords;
     documents.push(...page.documents);
     offset += page.documents.length;
+    onPage?.({ docType: search.docType, fetched: documents.length, total: totalRecords });
     const exhausted =
       page.documents.length === 0 ||
       (totalRecords !== undefined ? offset >= totalRecords : page.documents.length < SEARCH_PAGE_MAX);
@@ -97,11 +113,12 @@ export async function searchAcrossTypes(
   docTypes: readonly DocType[],
   search: Omit<DocumentSearch, "docType" | "limit" | "offset">,
   maxDocumentsPerType: number,
+  onPage?: OnPage,
 ): Promise<{ documents: MkRecord[]; truncatedTypes: DocType[] }> {
   const documents: MkRecord[] = [];
   const truncatedTypes: DocType[] = [];
   for (const docType of docTypes) {
-    const result = await searchAllDocuments(client, { ...search, docType }, maxDocumentsPerType);
+    const result = await searchAllDocuments(client, { ...search, docType }, maxDocumentsPerType, onPage);
     if (result.truncated) truncatedTypes.push(docType);
     // Some doc types come back without doc_type on each record; callers rely on it.
     documents.push(...result.documents.map((d) => (d.doc_type ? d : { ...d, doc_type: docType })));
@@ -259,4 +276,54 @@ export async function searchPartners(client: MetakockaClient, q: PartnerQuery): 
   if (q.phone) params.partner_phone_number = q.phone;
   const response = await client.call("get_partner", params);
   return asArray<MkRecord>(response.partner_list);
+}
+
+/** Report 38 is Metakocka's standard invoice print-out (sales and purchase invoices). */
+export const INVOICE_REPORT_ID = "38";
+
+/** A document printed as PDF, as Metakocka would print it from the app. */
+export async function printDocumentPdf(client: MetakockaClient, docId: string, reportId: string): Promise<Uint8Array> {
+  const { bytes } = await client.callBinary("report", {
+    mk_id: docId,
+    report_id: reportId,
+    params: [{ type: "REPORT_TYPE", value: "PDF" }],
+  });
+  return bytes;
+}
+
+/** The sales order a parcel (or return parcel) tracking code or sticker number belongs to. */
+export async function findByTrackingCode(
+  client: MetakockaClient,
+  q: { trackingCode?: string; stickerCode?: string },
+): Promise<MkRecord> {
+  const { opr_code: _c, opr_time_ms: _t, opr_time_no_lock_ms: _t2, ...rest } = await client.call("search_tracking_code", {
+    ...(q.trackingCode ? { tracking_code: q.trackingCode } : {}),
+    ...(q.stickerCode ? { sticker_code: q.stickerCode } : {}),
+  });
+  return rest;
+}
+
+export const BANK_PAGE_MAX = 100;
+
+/** Bank statements (izpiski) with their transactions, dated in [dateFrom, dateTo]. */
+export async function listBankStatements(
+  client: MetakockaClient,
+  q: { dateFrom: string; dateTo: string; maxStatements: number },
+  onPage?: (fetched: number) => void,
+): Promise<{ statements: MkRecord[]; truncated: boolean }> {
+  const statements: MkRecord[] = [];
+  while (statements.length < q.maxStatements) {
+    const limit = Math.min(BANK_PAGE_MAX, q.maxStatements - statements.length);
+    const response = await client.call("json/get_bank_statement", {
+      doc_date_from: toMkDate(q.dateFrom),
+      doc_date_to: toMkDate(q.dateTo),
+      limit,
+      offset: statements.length,
+    });
+    const page = asArray<MkRecord>(response.result);
+    statements.push(...page);
+    onPage?.(statements.length);
+    if (page.length < limit) return { statements, truncated: false };
+  }
+  return { statements, truncated: true };
 }
