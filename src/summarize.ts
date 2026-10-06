@@ -201,6 +201,7 @@ export function summarizePartner(p: MkRecord): MkRecord {
     ),
     addresses: asArray<MkRecord>(p.partner_delivery_address_list).map((a) =>
       compact({
+        id: str(a.mk_id),
         type: str(a.address_type),
         street: str(a.street),
         post_number: str(a.post_number),
