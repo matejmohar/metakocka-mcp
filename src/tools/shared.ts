@@ -10,6 +10,8 @@ import { str } from "../util.js";
 export interface ToolContext {
   /** Folder for files the tools save (PDFs). Defaults to pdfDirectory() from config.ts. */
   pdfDir?: string;
+  /** "embedded": return PDFs inside the tool result instead of saving them (HTTP server). */
+  pdfDelivery?: "file" | "embedded";
   /** Throws ConfigError when credentials are missing. */
   getClient: () => MetakockaClient;
   /** Injected for tests. */
@@ -48,6 +50,7 @@ export interface ToolResult {
   content: (
     | { type: "text"; text: string }
     | { type: "resource_link"; uri: string; name: string; mimeType?: string; description?: string }
+    | { type: "resource"; resource: { uri: string; mimeType: string; blob: string } }
   )[];
   isError?: boolean;
 }
@@ -66,6 +69,20 @@ export async function run(body: () => Promise<unknown>): Promise<ToolResult> {
     const value = await body();
     const text = typeof value === "string" ? value : JSON.stringify(value);
     return { content: [{ type: "text", text }] };
+  } catch (error) {
+    return { isError: true, content: [{ type: "text", text: describeError(error) }] };
+  }
+}
+
+/**
+ * Like run(), for tools with an outputSchema: the value also goes into
+ * structuredContent. It is round-tripped through JSON so it matches what the
+ * text says exactly (undefined fields dropped).
+ */
+export async function runStructured(body: () => Promise<Record<string, unknown>>): Promise<ToolResult> {
+  try {
+    const text = JSON.stringify(await body());
+    return { content: [{ type: "text", text }], structuredContent: JSON.parse(text) as Record<string, unknown> };
   } catch (error) {
     return { isError: true, content: [{ type: "text", text: describeError(error) }] };
   }

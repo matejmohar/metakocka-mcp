@@ -1,7 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import type { MetakockaClient } from "./client.js";
 import { TtlCache } from "./cache.js";
-import { cacheTtlMs, lazyClientFromEnv } from "./config.js";
+import { baseUrlFromEnv, cacheTtlMs, lazyClientFromEnv } from "./config.js";
+import { describeInstallation } from "./installation.js";
 import { registerPrompts } from "./prompts.js";
 import { registerResources } from "./resources.js";
 import { registerBankTools } from "./tools/bank.js";
@@ -28,6 +29,14 @@ export interface CreateServerOptions {
   cache?: TtlCache;
   /** Where get_document_pdf saves files; defaults to METAKOCKA_PDF_DIR or Downloads/Metakocka. */
   pdfDir?: string;
+  /** The API base URL the client talks to, named in the instructions when it isn't main.metakocka.si. Defaults to METAKOCKA_BASE_URL. */
+  baseUrl?: string;
+  /**
+   * How get_document_pdf hands over the PDF: "file" saves it on this computer
+   * (stdio, the default); "embedded" returns it inside the tool result, for
+   * the HTTP server, whose disk the user can't reach.
+   */
+  pdfDelivery?: "file" | "embedded";
 }
 
 const INSTRUCTIONS = [
@@ -51,13 +60,36 @@ const INSTRUCTIONS = [
   "Metakocka runs searches one at a time per company, so prefer one well-filtered call over many small ones.",
 ].join(" ");
 
+/** Tells the model when it is not looking at the public installation, so it doesn't present test data as real figures. */
+export function installationNote(baseUrl: string | undefined): string | undefined {
+  if (!baseUrl) return undefined;
+  const info = describeInstallation(baseUrl);
+  if (info.isDefault) return undefined;
+  return (
+    `This server is connected to the Metakocka installation at ${info.host}, not the public main.metakocka.si. ` +
+    "It may be a test, development or company-internal installation: say which installation the data comes from " +
+    "when it matters, and don't present it as production data unless the user says it is."
+  );
+}
+
+function urlFromEnvIfValid(): string | undefined {
+  try {
+    return baseUrlFromEnv();
+  } catch {
+    return undefined; // the tools report the bad setting on their first call
+  }
+}
+
 export function createServer(options: CreateServerOptions = {}): McpServer {
-  const server = new McpServer({ name: "metakocka", version: VERSION }, { instructions: INSTRUCTIONS });
+  const note = installationNote(options.baseUrl ?? urlFromEnvIfValid());
+  const instructions = note ? `${INSTRUCTIONS} ${note}` : INSTRUCTIONS;
+  const server = new McpServer({ name: "metakocka", version: VERSION }, { instructions });
   const ctx: ToolContext = {
     getClient: options.getClient ?? lazyClientFromEnv(),
     now: options.now ?? (() => new Date()),
     cache: options.cache ?? new TtlCache(cacheTtlMs()),
     pdfDir: options.pdfDir,
+    pdfDelivery: options.pdfDelivery ?? "file",
   };
   registerDocumentTools(server, ctx);
   registerCatalogTools(server, ctx);

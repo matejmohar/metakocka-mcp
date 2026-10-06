@@ -1,7 +1,9 @@
 name: Live API check
 # Read-only checks against a real Metakocka company (test/live), to catch API
 # changes on Metakocka's side. Needs the repository secrets
-# METAKOCKA_COMPANY_ID and METAKOCKA_SECRET_KEY — use a test company.
+# METAKOCKA_COMPANY_ID and METAKOCKA_SECRET_KEY — use a test company. To test
+# against another installation than main.metakocka.si, set the repository
+# variable METAKOCKA_BASE_URL.
 on:
   schedule:
     - cron: "0 5 * * *" # daily, 07:00 in Ljubljana (summer time)
@@ -16,6 +18,7 @@ jobs:
     env:
       METAKOCKA_COMPANY_ID: ${{ secrets.METAKOCKA_COMPANY_ID }}
       METAKOCKA_SECRET_KEY: ${{ secrets.METAKOCKA_SECRET_KEY }}
+      METAKOCKA_BASE_URL: ${{ vars.METAKOCKA_BASE_URL }}
     steps:
       - name: Check credentials
         id: creds

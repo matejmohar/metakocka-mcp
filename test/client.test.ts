@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MetakockaClient, MetakockaError } from "../src/client.js";
+import { MetakockaClient, MetakockaError, NetworkError } from "../src/client.js";
 import { fakeMetakocka } from "./fake-metakocka.js";
 
 describe("MetakockaClient", () => {
@@ -123,5 +123,48 @@ describe("MetakockaClient", () => {
     expect(file.contentType).toBe("application/pdf");
     expect([...file.bytes]).toEqual([...pdf]);
     await expect(client.callBinary("report", {})).rejects.toThrow(/report_id' must be valid number/);
+  });
+  it("explains network errors by their code, and doesn't retry certificate or DNS failures", async () => {
+    const failing = (code: string) => {
+      let calls = 0;
+      const client = new MetakockaClient({
+        companyId: "16",
+        secretKey: "s3cret-key",
+        baseUrl: "https://erp.firma.local:8443",
+        sleep: async () => {},
+        fetch: async () => {
+          calls++;
+          throw new TypeError("fetch failed", { cause: Object.assign(new Error(`connect ${code}`), { code }) });
+        },
+      });
+      return { client, calls: () => calls };
+    };
+
+    const cert = failing("SELF_SIGNED_CERT_IN_CHAIN");
+    const certError = (await cert.client.call("search").catch((e: unknown) => e)) as NetworkError;
+    expect(certError).toBeInstanceOf(NetworkError);
+    expect(certError.code).toBe("SELF_SIGNED_CERT_IN_CHAIN");
+    expect(certError.message).toContain("erp.firma.local:8443");
+    expect(certError.message).toContain("NODE_EXTRA_CA_CERTS");
+    expect(cert.calls()).toBe(1);
+
+    const dns = failing("ENOTFOUND");
+    await expect(dns.client.call("search")).rejects.toThrow(/host name erp\.firma\.local was not found/);
+    expect(dns.calls()).toBe(1);
+
+    const refused = failing("ECONNREFUSED");
+    await expect(refused.client.call("search")).rejects.toThrow(/refused the connection/);
+    expect(refused.calls()).toBe(3);
+  });
+
+  it("points at the URL path when the installation answers with a web page", async () => {
+    const page = () => new Response("<!DOCTYPE html><html>login</html>", { status: 200, headers: { "Content-Type": "text/html" } });
+    const { client } = fakeMetakocka({ search: page });
+    await expect(client.call("search")).rejects.toThrow(/web page .* instead of Metakocka API data.*\/rest\/eshop\/v1/);
+
+    const { client: proxied, calls } = fakeMetakocka({ search: () => new Response("<html>Bad gateway</html>", { status: 502 }) });
+    const error = (await proxied.call("search").catch((e: unknown) => e)) as MetakockaError;
+    expect(error.message).toBe("Metakocka at main.metakocka.si returned HTTP 502 for search");
+    expect(calls).toHaveLength(3);
   });
 });

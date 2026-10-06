@@ -8,7 +8,9 @@
  * API reference: https://github.com/metakocka/metakocka_api_base
  */
 
-export const DEFAULT_BASE_URL = "https://main.metakocka.si/rest/eshop/v1";
+import { DEFAULT_BASE_URL } from "./installation.js";
+
+export { DEFAULT_BASE_URL };
 
 export interface MetakockaClientOptions {
   companyId: string;
@@ -57,7 +59,9 @@ export interface BinaryResponse {
 export class MetakockaClient {
   private readonly companyId: string;
   private readonly secretKey: string;
-  private readonly baseUrl: string;
+  readonly baseUrl: string;
+  /** host[:port] of the installation, for messages. */
+  readonly host: string;
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
   private readonly fetchImpl: typeof fetch;
@@ -76,6 +80,7 @@ export class MetakockaClient {
     this.companyId = String(options.companyId);
     this.secretKey = options.secretKey;
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
+    this.host = new URL(this.baseUrl).host;
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.maxRetries = options.maxRetries ?? 2;
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
@@ -154,16 +159,30 @@ export class MetakockaClient {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (error) {
-      const reason =
-        error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")
-          ? `timed out after ${Math.round(this.timeoutMs / 1000)} s`
-          : this.redact(error instanceof Error ? error.message : String(error));
-      throw new NetworkError(`Could not reach Metakocka (${endpoint}): ${reason}`);
+      if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+        throw new NetworkError(`Could not reach Metakocka (${endpoint}): timed out after ${Math.round(this.timeoutMs / 1000)} s`, "TIMEOUT");
+      }
+      const code = networkErrorCode(error);
+      const reason = (code && NETWORK_REASONS[code]?.(this.host)) ?? this.redact(errorText(error));
+      throw new NetworkError(`Could not reach Metakocka at ${this.host} (${endpoint}): ${reason}`, code);
     }
     return response;
   }
 
   private parseJson<T>(endpoint: string, response: Response, text: string): T {
+    const webPage = /^\s*</.test(text);
+    if (webPage && !response.ok && response.status !== 404 && response.status !== 405) {
+      throw new MetakockaError(`Metakocka at ${this.host} returned HTTP ${response.status} for ${endpoint}`, undefined, response.status);
+    }
+    if (webPage) {
+      // A web page instead of the API: usually a wrong path in the Metakocka URL, or a login page / proxy in between.
+      throw new MetakockaError(
+        `${this.host} answered ${endpoint} with a web page (HTTP ${response.status}) instead of Metakocka API data. ` +
+          `Check the Metakocka URL: the API is usually at ${new URL(this.baseUrl).origin}/rest/eshop/v1 (now: ${this.baseUrl}).`,
+        undefined,
+        response.ok ? undefined : response.status,
+      );
+    }
     if (!response.ok) {
       throw new MetakockaError(
         `Metakocka returned HTTP ${response.status} for ${endpoint}${text ? `: ${this.redact(text.slice(0, 300))}` : ""}`,
@@ -199,15 +218,64 @@ export class MetakockaClient {
   }
 }
 
-class NetworkError extends MetakockaError {
-  constructor(message: string) {
+export class NetworkError extends MetakockaError {
+  constructor(
+    message: string,
+    /** Node's error code (ENOTFOUND, ECONNREFUSED, SELF_SIGNED_CERT_IN_CHAIN, …) or TIMEOUT, when known. */
+    readonly code?: string,
+  ) {
     super(message);
     this.name = "NetworkError";
   }
 }
 
+/** Certificate problems: retrying won't help, and the fix is a trusted certificate (or the right host name). */
+export const CERTIFICATE_ERROR_CODES = new Set([
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "CERT_HAS_EXPIRED",
+  "CERT_NOT_YET_VALID",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+]);
+
+const CERTIFICATE_REASON = (host: string) =>
+  `the TLS certificate of ${host} is not trusted. For a company or self-signed certificate, set NODE_EXTRA_CA_CERTS ` +
+  "(or the extension's \"CA certificate\" setting) to its CA certificate file";
+
+const NETWORK_REASONS: Record<string, (host: string) => string> = {
+  ENOTFOUND: (host) => `host name ${host.replace(/:\d+$/, "")} was not found (check the Metakocka URL and DNS / VPN)`,
+  EAI_AGAIN: (host) => `host name ${host.replace(/:\d+$/, "")} could not be resolved right now (DNS)`,
+  ECONNREFUSED: (host) => `${host} refused the connection (wrong port, or the server is not running)`,
+  ECONNRESET: () => "the connection was reset",
+  EHOSTUNREACH: (host) => `${host} is unreachable (check the network / VPN)`,
+  ENETUNREACH: (host) => `${host} is unreachable (check the network / VPN)`,
+  ETIMEDOUT: (host) => `connecting to ${host} timed out (check the network / VPN / firewall)`,
+  UND_ERR_CONNECT_TIMEOUT: (host) => `connecting to ${host} timed out (check the network / VPN / firewall)`,
+  EPROTO: (host) => `TLS handshake with ${host} failed (does it serve plain http:// instead of https://?)`,
+  ERR_SSL_WRONG_VERSION_NUMBER: (host) => `TLS handshake with ${host} failed (does it serve plain http:// instead of https://?)`,
+  ...Object.fromEntries([...CERTIFICATE_ERROR_CODES].map((code) => [code, CERTIFICATE_REASON])),
+};
+
+/** fetch() wraps the real network error in `cause` (sometimes twice). */
+function networkErrorCode(error: unknown): string | undefined {
+  for (let e: unknown = error, depth = 0; e && typeof e === "object" && depth < 4; e = (e as { cause?: unknown }).cause, depth++) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string" && code !== "UND_ERR_SOCKET") return code;
+  }
+  return undefined;
+}
+
+function errorText(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const cause = error.cause instanceof Error ? error.cause.message : undefined;
+  return cause && cause !== error.message ? `${error.message} (${cause})` : error.message;
+}
+
 function isRetryable(error: unknown): boolean {
-  if (error instanceof NetworkError) return true;
+  if (error instanceof NetworkError) return !(error.code && (CERTIFICATE_ERROR_CODES.has(error.code) || error.code === "ENOTFOUND"));
   if (error instanceof MetakockaError && error.httpStatus !== undefined) {
     return error.httpStatus === 429 || error.httpStatus >= 500;
   }

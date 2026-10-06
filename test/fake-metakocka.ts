@@ -55,3 +55,35 @@ export const invoice = (over: Record<string, unknown> = {}) => ({
   sum_all: "122",
   ...over,
 });
+
+/**
+ * The same fake, served over real HTTP on 127.0.0.1, for tests that go through
+ * the Metakocka URL setting and Node's own fetch.
+ */
+export async function serveFakeMetakocka(handlers: Record<string, Handler>, path = "/rest/eshop/v1") {
+  const { createServer } = await import("node:http");
+  const fake = fakeMetakocka(handlers);
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      if (!req.url?.startsWith(`${path}/`)) {
+        res.writeHead(404, { "Content-Type": "text/html" }).end("<html><body>Not found</body></html>");
+        return;
+      }
+      const endpoint = req.url.slice(path.length + 1);
+      void fake
+        .fetch(`http://fake/rest/eshop/v1/${endpoint}`, { method: "POST", body: Buffer.concat(chunks).toString("utf8") })
+        .then(async (r) => {
+          res.writeHead(r.status, Object.fromEntries(r.headers)).end(Buffer.from(await r.arrayBuffer()));
+        });
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  return {
+    origin: `http://127.0.0.1:${port}`,
+    calls: fake.calls,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}

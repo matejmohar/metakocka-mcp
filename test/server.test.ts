@@ -91,6 +91,38 @@ describe("MCP server", () => {
     }
   });
 
+  it("declares output schemas for the report tools", async () => {
+    const { client } = await setup({});
+    const { tools } = await client.listTools();
+    const withSchema = tools.filter((t) => t.outputSchema).map((t) => t.name).sort();
+    expect(withSchema).toEqual(["get_unpaid_invoices", "purchase_summary", "sales_summary", "stock_valuation"]);
+    const sales = tools.find((t) => t.name === "sales_summary")!.outputSchema as { type: string; required: string[] };
+    expect(sales.type).toBe("object");
+    expect(sales.required).toEqual(expect.arrayContaining(["period", "totals_by_currency", "groups"]));
+  });
+
+  it("returns structured content for a summary without comparison too, and none for errors", async () => {
+    const { client } = await setup({ search: () => ({ opr_code: "0", result_all_records: "1", result: [invoice()] }) });
+    const result = await client.callTool({
+      name: "purchase_summary",
+      arguments: { date_from: "2026-09-01", date_to: "2026-09-30", group_by: "product", doc_types: ["purchase_bill_domestic"] },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ group_by: "product", groups: [{ product: "A1 – Widget", net: 100, quantity: 2 }] });
+
+    const failed = await client.callTool({ name: "sales_summary", arguments: { date_from: "2026-09-30", date_to: "2026-09-01" } });
+    expect(failed.isError).toBe(true);
+    expect(failed.structuredContent).toBeUndefined();
+  });
+
+  it("names a non-public installation in the instructions", async () => {
+    const internal = await connect(() => fakeMetakocka({}).client, { baseUrl: "http://10.0.0.15:8080/rest/eshop/v1" });
+    expect(internal.getInstructions()).toContain("connected to the Metakocka installation at 10.0.0.15:8080");
+    await cleanup?.();
+    const main = await connect(() => fakeMetakocka({}).client, { baseUrl: "https://main.metakocka.si/rest/eshop/v1" });
+    expect(main.getInstructions()).not.toContain("installation at");
+  });
+
   it("lists the same tools as the .mcpb manifest", async () => {
     const { client } = await setup({});
     const { tools } = await client.listTools();
@@ -373,6 +405,7 @@ describe("MCP server", () => {
     expect(data.invoices).toHaveLength(2);
     expect(data.invoices_not_listed).toBe(99);
     expect(data.warning).toBeUndefined();
+    expect(result.structuredContent).toEqual(data);
   });
 
   it("sales_summary warns when results are truncated", async () => {
@@ -422,6 +455,7 @@ describe("MCP server", () => {
     expect(data.totals_by_currency.EUR).toMatchObject({ net: 300, previous_net: 180, change_net: 120 });
     expect(data.groups[0]).toMatchObject({ partner: "ACME d.o.o.", net: 300, previous_net: 100 });
     expect(data.biggest_declines[0]).toMatchObject({ partner: "Lost Ltd", change_net: -80 });
+    expect(result.structuredContent).toEqual(data);
   });
 
   it("purchase_summary reads received invoices", async () => {
@@ -610,8 +644,10 @@ describe("MCP server", () => {
         ],
       }),
     });
-    const data = json(await client.callTool({ name: "stock_valuation", arguments: { warehouse: "maribor" } }));
+    const result = await client.callTool({ name: "stock_valuation", arguments: { warehouse: "maribor" } });
+    const data = json(result);
     expect(data).toMatchObject({ warehouse: "Maribor", total_value: 30, by_warehouse: [{ warehouse: "Maribor", value: 30 }] });
+    expect(result.structuredContent).toEqual(data);
   });
 
   it("stock_movements reads warehouse documents and keeps only the product's lines", async () => {
@@ -762,6 +798,25 @@ describe("MCP server", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("get_document_pdf returns the PDF inside the result when served over HTTP", async () => {
+    const { client } = await setup(
+      {
+        search: () => ({ opr_code: "0", result: [{ mk_id: "222", count_code: "1-MK-7" }] }),
+        report: () => new Response(new Uint8Array([0x25, 0x50, 0x44, 0x46]), { headers: { "Content-Type": "application/pdf" } }),
+      },
+      { pdfDelivery: "embedded" },
+    );
+    const { tools } = await client.listTools();
+    expect(tools.find((t) => t.name === "get_document_pdf")!.annotations?.readOnlyHint).toBe(true);
+    const result = await client.callTool({ name: "get_document_pdf", arguments: { doc_type: "sales_bill_domestic", number: "1-MK-7" } });
+    expect(json(result)).toMatchObject({ file_name: "sales_bill_domestic_1-MK-7.pdf", id: "222" });
+    expect(json(result).saved_to).toBeUndefined();
+    const block = (result.content as { type: string; resource?: { mimeType: string; blob: string } }[])[1]!;
+    expect(block.type).toBe("resource");
+    expect(block.resource!.mimeType).toBe("application/pdf");
+    expect(Buffer.from(block.resource!.blob, "base64").toString("latin1")).toBe("%PDF");
   });
 
   it("get_document_pdf asks for a report_id for non-invoice documents", async () => {

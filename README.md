@@ -83,6 +83,10 @@ All prompts take an optional `language` (`sl` or `en`). Resources: `metakocka://
 2. Double-click it (or drag it into Claude Desktop → Settings → Extensions) and click **Install**.
 3. Paste your company ID and secret key (see step 1 below). The key is stored in your system keychain.
 
+Optional settings in the extension: **Metakocka URL** (for an installation other than `main.metakocka.si`, see
+[Other Metakocka installations](#other-metakocka-installations)), **CA certificate**, **request timeout**,
+**cache duration** and **PDF folder**.
+
 No Node.js or config file needed. To update, download the newer `.mcpb` and open it; it replaces the old version and keeps your settings.
 
 The manual setup below works with any MCP client.
@@ -134,8 +138,9 @@ claude mcp add metakocka \
 npx -y metakocka-mcp --check
 ```
 
-(with `METAKOCKA_COMPANY_ID` and `METAKOCKA_SECRET_KEY` set) verifies your credentials and connection, explains what to fix
-if something is wrong, and tells you if a newer version exists.
+(with `METAKOCKA_COMPANY_ID` and `METAKOCKA_SECRET_KEY` set) shows which installation it connects to, verifies your
+credentials and connection, times a document search, explains what to fix if something is wrong, and tells you if a
+newer version exists.
 
 ### Configuration
 
@@ -143,10 +148,60 @@ if something is wrong, and tells you if a newer version exists.
 |---|---|---|
 | `METAKOCKA_COMPANY_ID` | yes | |
 | `METAKOCKA_SECRET_KEY` | yes | |
-| `METAKOCKA_BASE_URL` | no | `https://main.metakocka.si/rest/eshop/v1` |
-| `METAKOCKA_TIMEOUT_MS` | no | `30000` |
+| `METAKOCKA_BASE_URL` | no | `https://main.metakocka.si/rest/eshop/v1` — see [Other Metakocka installations](#other-metakocka-installations) |
+| `NODE_EXTRA_CA_CERTS` | no | CA certificate (PEM file) for an installation with a company or self-signed certificate |
+| `METAKOCKA_TIMEOUT_MS` | no | `30000` (or `METAKOCKA_TIMEOUT_SECONDS`) |
 | `METAKOCKA_CACHE_SECONDS` | no | `300` — how long warehouses and partner lookups are reused; `0` turns caching off |
 | `METAKOCKA_PDF_DIR` | no | `Downloads/Metakocka` — where `get_document_pdf` saves files |
+
+### Other Metakocka installations
+
+By default the server talks to the public installation, `main.metakocka.si`. To use another one (a test or development
+installation, or one on your company's own domain, internal network or IP address), set `METAKOCKA_BASE_URL`, or
+**Metakocka URL** in the Claude Desktop extension. Any of these work:
+
+| You enter | Used as |
+|---|---|
+| *(empty)* | `https://main.metakocka.si/rest/eshop/v1` |
+| `https://erp.example.com` | `https://erp.example.com/rest/eshop/v1` |
+| `http://10.0.0.15:8080` | `http://10.0.0.15:8080/rest/eshop/v1` |
+| `192.168.1.20` | `https://192.168.1.20/rest/eshop/v1` |
+| `https://intranet.example.com/mk/rest/eshop/v1` | used as is |
+
+- Without `http://` or `https://`, HTTPS is used. Plain HTTP must be written out; `--check` warns about it, because the
+  secret key is then sent unencrypted.
+- Without a path, `/rest/eshop/v1` is added. A path you enter is kept as is.
+- If the installation uses a company or self-signed TLS certificate, point `NODE_EXTRA_CA_CERTS` (or the extension's
+  **CA certificate** setting) to the CA certificate in PEM format, and restart.
+- When the server is not connected to `main.metakocka.si`, it tells the assistant which installation it is using, so
+  data from a test installation is not presented as your real figures.
+
+`npx -y metakocka-mcp --check` tells you if the address is wrong, the host can't be found or refuses the connection,
+the certificate isn't trusted, or the address answers with a web page instead of the API.
+
+### Running as an HTTP server
+
+For a team, run one server and connect to it over HTTP instead of installing it on every computer:
+
+```sh
+npx -y metakocka-mcp --http --port 3000
+```
+
+The MCP endpoint is `http://127.0.0.1:3000/mcp` (`/health` answers health checks). Each client sends its own
+credentials in the `X-Metakocka-Company-Id` and `X-Metakocka-Secret-Key` headers, so one server can serve several
+companies, each with its own request queue and cache. The installation is set on the server (`METAKOCKA_BASE_URL`);
+clients can't change it. In HTTP mode `get_document_pdf` returns the PDF inside the tool result instead of saving it on
+the server.
+
+| Variable | Default |
+|---|---|
+| `METAKOCKA_HTTP_PORT` / `--port` | `3000` |
+| `METAKOCKA_HTTP_HOST` / `--host` | `127.0.0.1` (this computer only). Use `0.0.0.0` to accept connections from other computers |
+| `METAKOCKA_HTTP_TOKEN` | Require `Authorization: Bearer <token>` on every request. Requests with the token but without credential headers use the server's own `METAKOCKA_COMPANY_ID` / `METAKOCKA_SECRET_KEY`, which are never used without a token |
+| `METAKOCKA_HTTP_ALLOWED_HOSTS` | Comma-separated host names clients connect with. On `127.0.0.1` only `localhost` names are accepted, which protects against DNS rebinding |
+
+The server speaks plain HTTP. When other computers connect to it, put it behind a reverse proxy that terminates TLS,
+because secret keys travel in the request headers.
 
 ## How it works
 
@@ -155,7 +210,8 @@ if something is wrong, and tells you if a newer version exists.
   retried automatically on network errors and temporary server errors. Warehouses and partner lookups are cached
   for a few minutes, and long reports send progress updates to clients that show them.
 - Responses are trimmed to the useful fields and numbers/dates are normalised, so the assistant uses less context
-  and makes fewer mistakes.
+  and makes fewer mistakes. The report tools (`get_unpaid_invoices`, `sales_summary`, `purchase_summary`,
+  `stock_valuation`) also return typed structured output, for clients that build charts or tables from it.
 - Dates are `YYYY-MM-DD` in the Europe/Ljubljana time zone.
 - The secret key is never included in error messages.
 
@@ -186,8 +242,12 @@ src/
   tools/          MCP tool definitions
   prompts.ts      MCP prompts
   resources.ts    MCP resources
-  server.ts       createServer() — reusable for stdio and (later) HTTP hosting
-  index.ts        stdio entry point (the `metakocka-mcp` command)
+  installation.ts which Metakocka installation to use: URL normalisation and checks
+  config.ts       settings from environment variables
+  doctor.ts       `--check`
+  server.ts       createServer() — shared by stdio and HTTP
+  http.ts         `--http`: Streamable HTTP server with per-request credentials
+  index.ts        the `metakocka-mcp` command
 ```
 
 ### Releasing
@@ -203,7 +263,8 @@ is added automatically once the repository is public.
 
 The **Live API check** workflow runs `npm run test:live` every morning against a real Metakocka company, to catch API
 changes on Metakocka's side. It needs the `METAKOCKA_COMPANY_ID` and `METAKOCKA_SECRET_KEY` repository secrets (use a
-test company); without them it is skipped.
+test company); without them it is skipped. To run it against another installation, set the `METAKOCKA_BASE_URL`
+repository variable.
 
 Metakocka's API reference: [github.com/metakocka/metakocka_api_base](https://github.com/metakocka/metakocka_api_base).
 
@@ -214,6 +275,7 @@ Metakocka's API reference: [github.com/metakocka/metakocka_api_base](https://git
 - [x] Partner detail and statements, product detail, low stock, stock movements and valuation, purchase summary, period comparison
 - [ ] Opt-in write tools (create offers and sales orders, change order status) with previews before anything is saved
 - [x] PDF export of invoices, bank statements, payment dates, tracking codes, live API check
+- [x] Any Metakocka installation (own domain, internal host or IP), HTTP server mode, structured report output
 - [ ] Hosted version: connect from Claude or ChatGPT without installing anything
 
 ## Need help?
