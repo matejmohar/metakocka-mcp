@@ -49,6 +49,7 @@ const PRODUCTS = [
   { mk_id: "P3", count_code: "3", code: "OLD", name: "Star artikel", sales: "true", activated: "false", pricelist: priced() },
   { mk_id: "P4", count_code: "4", code: "INT", name: "Interno", sales: "false", activated: "true", pricelist: priced() },
   { mk_id: "P5", count_code: "5", code: "NOPRICE", name: "Brez cene", sales: "true", activated: "true" },
+  { mk_id: "P6", count_code: "6", code: "SUPPORT", name: "Support", unit: "h", service: "true", sales: "true", activated: "true", pricelist: priced("000", "0", "35") },
 ];
 
 interface FakeOptions {
@@ -56,6 +57,8 @@ interface FakeOptions {
   put?: Handler;
   stored?: (body: Body) => Record<string, unknown>;
   search?: Handler;
+  /** Existing documents get_document returns, by id. */
+  documents?: Record<string, Record<string, unknown>>;
 }
 
 /** A Metakocka that knows one partner and a small catalogue, and stores offers it is given. */
@@ -71,6 +74,8 @@ function metakocka(o: FakeOptions = {}) {
       return { opr_code: "0", mk_id: `OFFER${saved.length}`, count_code: `${saved.length + 2}/2026`, partner: { mk_id: (body.partner as Body).mk_id } };
     },
     get_document: (body) => {
+      const existing = o.documents?.[String(body.doc_id)];
+      if (existing) return { opr_code: "0", ...existing };
       const put = saved[Number(String(body.doc_id).replace("OFFER", "")) - 1] ?? saved[0]!;
       return { opr_code: "0", ...(o.stored ? o.stored(put) : storedFrom(put)) };
     },
@@ -162,18 +167,21 @@ describe("write tools are opt-in", () => {
     expect(client.getInstructions()).not.toMatch(/^Read-only/);
   });
 
-  it("settings: off by default, offers enables, unknown values are refused", () => {
+  it("settings: off by default, offers and invoices enable, unknown values are refused", () => {
     expect(writeSettingsFromEnv({})).toBeUndefined();
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "off" })).toBeUndefined();
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers" })).toMatchObject({ docTypes: ["sales_offer"], confirm: "client", timeoutMs: 120_000 });
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers", METAKOCKA_WRITE_CONFIRM: "elicitation" })?.confirm).toBe("elicitation");
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers", METAKOCKA_WRITE_CONFIRM: "never" })?.confirm).toBe("never");
-    expect(() => writeSettingsFromEnv({ METAKOCKA_WRITE: "offers,invoices" })).toThrow(ConfigError);
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers,invoices" })?.docTypes).toEqual(["sales_offer", "sales_bill_domestic", "sales_bill_foreign"]);
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "invoices" })?.docTypes).toEqual(["sales_bill_domestic", "sales_bill_foreign"]);
+    expect(() => writeSettingsFromEnv({ METAKOCKA_WRITE: "offers,orders" })).toThrow(ConfigError);
     // The Claude Desktop extension's checkboxes.
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "false", METAKOCKA_WRITE_CONFIRM: "true" })).toBeUndefined();
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "true", METAKOCKA_WRITE_CONFIRM: "true" })).toMatchObject({ docTypes: ["sales_offer"], confirm: "client" });
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "true", METAKOCKA_WRITE_CONFIRM: "false" })?.confirm).toBe("never");
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "${user_config.allow_offers}" })).toBeUndefined();
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "false", METAKOCKA_WRITE_INVOICES: "true" })?.docTypes).toEqual(["sales_bill_domestic", "sales_bill_foreign"]);
     expect(() => writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "yes please" })).toThrow(ConfigError);
     expect(() => writeSettingsFromEnv({ METAKOCKA_WRITE: "offers", METAKOCKA_WRITE_CONFIRM: "sometimes" })).toThrow(ConfigError);
     expect(() => writeSettingsFromEnv({ METAKOCKA_WRITE: "offers", METAKOCKA_WRITE_CONFIRM: "always" })).toThrow(ConfigError);
@@ -529,5 +537,183 @@ describe("commit_document", () => {
     expect(entries[0]).toMatchObject({ draft_id: d.draft_id, doc_type: "sales_offer", payload: { partner: { mk_id: "400068941553" } } });
     expect(entries[1]).toMatchObject({ mk_id: "OFFER1", number: "3/2026" });
     expect(log).not.toContain("s3cret-key");
+  });
+});
+
+describe("invoices", () => {
+  const INVOICES: WriteSettings = { docTypes: ["sales_offer", "sales_bill_domestic", "sales_bill_foreign"], confirm: "never", timeoutMs: 120_000 };
+  const write = () => quiet(INVOICES);
+  const DOMESTIC = { doc_type: "sales_bill_domestic", partner_id: "400068941553", lines: [{ product_id: "P1", quantity: 2 }] };
+  const withTerm = (days: string) =>
+    partner({ partner_delivery_address_list: [{ mk_id: "400079138037", street: "Glavna 1", post_number: "1000", city: "Ljubljana", country: "Slovenia", payment_due_days: days }] });
+  const FOREIGN_PARTNER = partner({
+    mk_id: "400066072082",
+    customer: "Codeer Limited",
+    tax_id_number: "CY10383869C",
+    foreign_county: "true",
+    partner_delivery_address_list: [{ mk_id: "400075425335", street: "Theodorou Kolokotroni 3", post_number: "8300", city: "Konia", country: "Cyprus" }],
+  });
+  const FOREIGN = { doc_type: "sales_bill_foreign", partner_id: "400066072082", lines: [{ code: "SUPPORT", quantity: 10 }] };
+  /** Earlier invoices to a partner, as /search returns them. */
+  const history = (partnerId: string, docs: Record<string, unknown>[]) => (body: Body) =>
+    filterValue(body, "partner_mk_id") === partnerId
+      ? { opr_code: "0", result_all_records: String(docs.length), result: docs.map((d) => ({ partner: { mk_id: partnerId }, ...d })) }
+      : { opr_code: "0", result_all_records: "0", result: [] };
+
+  it("drafts a domestic invoice: not issued, service date today, payment term from the partner", async () => {
+    const fake = metakocka({ partners: [withTerm("15")] });
+    const { client } = await connect(fake, { write: write() });
+    const { body } = await draft(client, DOMESTIC);
+    expect(body).toMatchObject({ due_date: "2026-10-20", due_from: "partner's payment term in Metakocka", service_to: "2026-10-05" });
+    expect(body.summary).toBe(
+      [
+        "Ustvari RAČUN (neizdan) za ACME d.o.o. (SI12345678)",
+        "Glavna 1, 1000 Ljubljana, Slovenia",
+        "",
+        "Postavke:",
+        "  1. 2 × Svetovanje à 35,00 € = 70,00 €",
+        "",
+        "Osnova: 70,00 €",
+        "DDV: 15,40 €",
+        "Skupaj z DDV: 85,40 €",
+        "",
+        "Datum 2026-10-05 · storitev 2026-10-05 · rok plačila 2026-10-20",
+      ].join("\n"),
+    );
+    // Nothing had to be looked up in earlier invoices.
+    expect(fake.calls.filter((c) => c.endpoint === "search")).toHaveLength(0);
+
+    const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
+    expect(r.status).toBe("created");
+    const { company_id: _c, secret_key: _s, ...sent } = fake.puts()[0]!.body;
+    expect(sent).toEqual({
+      doc_type: "sales_bill_domestic",
+      doc_date: "05.10.2026",
+      service_to_date: "05.10.2026",
+      duo_payment: "20.10.2026",
+      partner: { mk_id: "400068941553", mk_address_id: "400079138037" },
+      currency_code: "EUR",
+      product_list: [{ mk_id: "P1", code: "SVC-H", count_code: "1", amount: "2", price: "35", discount: "0", tax: "EX4" }],
+      document_change_log_notes: `metakocka-mcp ${body.draft_id}`,
+    });
+  });
+
+  it("takes the payment term of the partner's last invoice, and asks when there is none", async () => {
+    const fake = metakocka({
+      search: history("400068941553", [
+        { count_code: "RD-1/2026", doc_date: "2026-07-21+02:00", duo_payment: "2026-08-20+02:00" },
+        { count_code: "RD-3/2026", doc_date: "2026-09-24+02:00", duo_payment: "2026-10-01+02:00" },
+      ]),
+    });
+    const { client } = await connect(fake, { write: write() });
+    const { body } = await draft(client, DOMESTIC);
+    expect(body).toMatchObject({ due_date: "2026-10-12", due_from: "7 days, as on the partner's last invoice RD-3/2026" });
+
+    const none = metakocka();
+    const { client: c2 } = await connect(none, { write: write() });
+    const { result } = await draft(c2, DOMESTIC);
+    expect(result.isError).toBe(true);
+    expect(parse(result)).toMatch(/no payment term in Metakocka and no earlier invoice.*due_days/);
+    const { body: given } = await draft(c2, { ...DOMESTIC, due_days: 8, service_from: "2026-09-01", service_to: "2026-09-30" });
+    expect(given).toMatchObject({ due_date: "2026-10-13", due_from: "given" });
+    expect(given.summary).toMatch(/storitev 2026-09-01 – 2026-09-30 · rok plačila 2026-10-13$/);
+  });
+
+  it("foreign invoices: only for foreign partners, only lines without VAT, with the VAT note of the last foreign invoice", async () => {
+    const note = "VAT is not calculated in accordance with Article 25 ZDDV-1. Reverse charge.";
+    const fake = metakocka({
+      partners: [partner(), FOREIGN_PARTNER],
+      search: history("400066072082", [{ count_code: "9/2026", doc_date: "2026-10-01+02:00", duo_payment: "2026-10-15+02:00", notes: note }]),
+    });
+    const { client } = await connect(fake, { write: write() });
+
+    expect(parse((await draft(client, { ...FOREIGN, doc_type: "sales_bill_domestic" })).result)).toMatch(/Codeer Limited is a foreign partner: use doc_type sales_bill_foreign/);
+    expect(parse((await draft(client, { ...DOMESTIC, doc_type: "sales_bill_foreign" })).result)).toMatch(/domestic partner: use doc_type sales_bill_domestic/);
+    expect(parse((await draft(client, { ...FOREIGN, lines: [{ product_id: "P1", quantity: 1 }] })).result)).toMatch(/Svetovanje has 22 % VAT/);
+
+    const { body } = await draft(client, FOREIGN);
+    expect(body).toMatchObject({ due_date: "2026-10-19", totals: { net: 350, tax: 0, gross: 350 } });
+    expect(body.warnings).toEqual(["The note is copied from the partner's last foreign invoice 9/2026."]);
+    expect(body.summary).toMatch(/^Ustvari TUJI RAČUN \(neizdan\) za Codeer Limited \(CY10383869C\)\nTheodorou Kolokotroni 3, 8300 Konia, Cyprus\nOpomba: VAT is not calculated/);
+
+    // A product without a price list takes the catalogue's only 0 % tax code.
+    const { body: noPrice } = await draft(client, { ...FOREIGN, lines: [{ code: "NOPRICE", quantity: 1, price: 5 }], note: "" });
+    expect(noPrice.lines[0]).toMatchObject({ vat_percent: 0, total: 5 });
+    await client.callTool({ name: "commit_document", arguments: { draft_id: noPrice.draft_id } });
+    const sent = fake.puts()[0]!.body;
+    expect(sent.notes).toBeUndefined();
+    expect(sent.product_list).toEqual([{ mk_id: "P5", code: "NOPRICE", count_code: "5", amount: "1", price: "5", discount: "0", tax: "000" }]);
+  });
+
+  it("a foreign invoice without a note and no earlier one to copy it from asks for the note", async () => {
+    const fake = metakocka({ partners: [FOREIGN_PARTNER] });
+    const { client } = await connect(fake, { write: write() });
+    const { result } = await draft(client, { ...FOREIGN, due_days: 14 });
+    expect(parse(result)).toMatch(/needs the VAT note.*no earlier foreign invoice/);
+  });
+
+  it("invoices an offer: its partner, its lines as they are, linked to it", async () => {
+    const offer = {
+      mk_id: "OF4",
+      doc_type: "sales_offer",
+      count_code: "4/2026",
+      partner: { mk_id: "400068941553", mk_address_id: "400079138037", customer: "ACME d.o.o." },
+      currency_code: "EUR",
+      product_list: [{ mk_id: "P1", code: "SVC-H", amount: "3", price: "30", discount: "10", tax: "EX4" }],
+    };
+    const fake = metakocka({
+      partners: [withTerm("8"), partner({ mk_id: "OTHER", customer: "Other" })],
+      documents: { OF4: offer, OF5: { ...offer, mk_id: "OF5", count_code: "5/2026", product_list: [{ name: "Prosta vrstica", amount: "1", price: "5", tax: "EX4" }] } },
+      search: (body) => {
+        if (body.doc_type === "sales_offer") {
+          const hit = [offer, { mk_id: "OF5", count_code: "5/2026" }].find((o) => o.count_code === body.query);
+          return { opr_code: "0", result: hit ? [hit] : [] };
+        }
+        return history("400068941553", [{ count_code: "RD-2/2026", doc_date: "2026-09-15+02:00", offer_list: [{ mk_id: "OF4", count_code: "4/2026" }] }])(body);
+      },
+    });
+    const { client } = await connect(fake, { write: write() });
+    const { body } = await draft(client, { doc_type: "sales_bill_domestic", from_offer: "4/2026" });
+    expect(body.lines).toEqual([expect.objectContaining({ product_id: "P1", quantity: 3, price: 30, discount_percent: 10, vat_percent: 22, net: 81, total: 98.82 })]);
+    expect(body.warnings).toEqual(["Offer 4/2026 already has an invoice: RD-2/2026."]);
+    expect(body.summary).toMatch(/\nIz ponudbe: 4\/2026\n/);
+    await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } });
+    expect(fake.puts()[0]!.body).toMatchObject({ offer_list: [{ count_code: "4/2026" }], partner: { mk_id: "400068941553" }, duo_payment: "13.10.2026" });
+
+    expect(parse((await draft(client, { doc_type: "sales_bill_domestic", from_offer: "4/2026", partner_id: "OTHER" })).result)).toMatch(/for another partner/);
+    expect(parse((await draft(client, { doc_type: "sales_bill_domestic", from_offer: "5/2026" })).result)).toMatch(/line 1 \(Prosta vrstica\) is not a product/);
+    expect(parse((await draft(client, { doc_type: "sales_bill_domestic", from_offer: "99/2026" })).result)).toMatch(/No offer 99\/2026/);
+    expect(parse((await draft(client, { ...DOMESTIC, from_offer: "4/2026" })).result)).toMatch(/either lines or from_offer/);
+  });
+
+  it("keeps offer and invoice fields apart", async () => {
+    const { client } = await connect(metakocka({ partners: [withTerm("8")] }), { write: write() });
+    expect(parse((await draft(client, { ...OFFER, due_days: 8 })).result)).toMatch(/due_days: only for invoices/);
+    expect(parse((await draft(client, { ...DOMESTIC, valid_days: 8 })).result)).toMatch(/valid_days: only for offers/);
+    expect(parse((await draft(client, { ...DOMESTIC, service_from: "2026-10-09", service_to: "2026-10-01" })).result)).toMatch(/service_from is after service_to/);
+  });
+
+  it("warns when the saved invoice is already issued or has another due date", async () => {
+    const fake = metakocka({
+      partners: [withTerm("15")],
+      stored: (put) => ({ ...storedFrom(put), duo_payment: "2026-10-30+01:00", publish_ts: "2026-10-05T12:00:00+02:00" }),
+    });
+    const { client } = await connect(fake, { write: write() });
+    const { body } = await draft(client, DOMESTIC);
+    const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
+    expect(r.warnings[0]).toMatch(/due date 2026-10-30, not 2026-10-20; the invoice is already issued/);
+  });
+
+  it("the tools describe invoices only when they are on", async () => {
+    const { client } = await connect(metakocka(), { write: write() });
+    const tool = (await client.listTools()).tools.find((t) => t.name === "draft_document")!;
+    expect(tool.title).toBe("Draft a document (offer, invoice)");
+    expect(tool.description).toMatch(/saved NOT issued/);
+    expect(client.getInstructions()).toMatch(/can create offers \(ponudba \/ predračun\) and invoices/);
+
+    const { client: offersOnly } = await connect(metakocka());
+    const offerTool = (await offersOnly.listTools()).tools.find((t) => t.name === "draft_document")!;
+    expect(offerTool.description).not.toMatch(/invoice/i);
+    expect(Object.keys((offerTool.inputSchema as { properties: object }).properties)).not.toContain("from_offer");
   });
 });

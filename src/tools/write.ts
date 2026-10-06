@@ -1,5 +1,5 @@
 /**
- * Opt-in tools that create documents in Metakocka (METAKOCKA_WRITE).
+ * Opt-in tools that create documents in Metakocka (METAKOCKA_WRITE): offers and invoices.
  * draft_document builds and checks a document without saving it;
  * commit_document saves exactly that draft, after the user confirms it in
  * their client (see WriteSettings.confirm); discard_draft drops it.
@@ -11,8 +11,10 @@ import { describeInstallation } from "../installation.js";
 import { commitDraft, resolveUnknown } from "../write/commit.js";
 import { DraftStore, type Draft } from "../write/drafts.js";
 import { createJournal, type Journal } from "../write/journal.js";
-import { buildOfferDraft, sameSummary } from "../write/offer.js";
-import type { WriteSettings } from "../write/settings.js";
+import { DraftError, sameSummary } from "../write/document.js";
+import { buildInvoiceDraft, type InvoiceInfo, type InvoiceInput, type InvoiceType } from "../write/invoice.js";
+import { buildOfferDraft } from "../write/offer.js";
+import { INVOICE_TYPES, type WriteSettings } from "../write/settings.js";
 import { compact } from "../util.js";
 import { run, type ToolContext } from "./shared.js";
 
@@ -48,19 +50,38 @@ const COMMIT_CONFIRMATION: Record<WriteSettings["confirm"], string> = {
 export function registerWriteTools(server: McpServer, ctx: ToolContext, write: WriteContext): void {
   const { settings, drafts, journal } = write;
 
+  const offers = settings.docTypes.includes("sales_offer");
+  const invoices = settings.docTypes.some((t) => INVOICE_TYPES.includes(t));
+  const what = [offers && "an offer (ponudba / predračun)", invoices && "an invoice (račun, domestic or foreign)"].filter(Boolean).join(" or ");
+  const docTypeHelp = [
+    offers && "sales_offer = ponudba (also used as predračun)",
+    invoices && "sales_bill_domestic = račun for a domestic partner, sales_bill_foreign = tuji račun for a foreign partner",
+  ].filter(Boolean).join("; ");
+
   server.registerTool(
     "draft_document",
     {
-      title: "Draft a document (offer)",
+      title: `Draft a document (${[offers && "offer", invoices && "invoice"].filter(Boolean).join(", ")})`,
       description:
-        "Prepare a new offer (ponudba / predračun) in Metakocka WITHOUT saving it. Everything is linked to records that " +
+        `Prepare ${what} in Metakocka WITHOUT saving it. Everything is linked to records that ` +
         "already exist: the partner by its id (from search_partners) and products by their id (from search_products). " +
         "This tool never creates partners or products; if one is missing, tell the user to add it in Metakocka. " +
-        "Prices and VAT come from Metakocka's price list unless a price is given. Returns a draft_id and a summary: " +
-        "show the summary to the user, then call commit_document with the draft_id to save it. Drafts expire after 15 minutes.",
+        "Prices and VAT come from Metakocka's price list unless a price is given. " +
+        (invoices
+          ? "Invoices are saved NOT issued: the user checks and issues (prints) them in Metakocka; they move no stock. " +
+            "An invoice can also be made from an offer (from_offer: its lines, partner and a link to it). The payment term " +
+            "comes from the partner (its term in Metakocka, else its last invoice) unless given. Foreign invoices take only " +
+            "lines without VAT and, unless a note is given, the VAT note of the partner's last foreign invoice. "
+          : "") +
+        "Returns a draft_id and a summary: show the summary to the user, then call commit_document with the draft_id to save it. " +
+        "Drafts expire after 15 minutes.",
       inputSchema: z.object({
-        doc_type: z.enum(settings.docTypes as [string, ...string[]]).describe("sales_offer = ponudba (also used as predračun)."),
-        partner_id: z.string().min(1).describe("The partner's Metakocka id (mk_id, the `id` from search_partners)."),
+        doc_type: z.enum(settings.docTypes as [string, ...string[]]).describe(`${docTypeHelp}.`),
+        partner_id: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(`The partner's Metakocka id (mk_id, the \`id\` from search_partners).${invoices ? " With from_offer it can be left out." : ""}`),
         address_id: z
           .string()
           .optional()
@@ -76,10 +97,20 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
             }),
           )
           .min(1)
-          .max(50),
-        title: z.string().max(100).optional().describe("Offer title (naziv)."),
-        note: z.string().max(1000).optional().describe("Note printed on the offer."),
-        valid_days: z.number().int().min(1).max(365).optional().describe("How many days the offer is valid (default 30)."),
+          .max(50)
+          .optional(),
+        title: z.string().max(100).optional().describe("Document title (naziv)."),
+        note: z.string().max(1000).optional().describe("Note printed on the document."),
+        ...(offers ? { valid_days: z.number().int().min(1).max(365).optional().describe("Offers: how many days the offer is valid (default 30).") } : {}),
+        ...(invoices
+          ? {
+              from_offer: z.string().min(1).optional().describe("Invoices: number of the offer to invoice (e.g. \"4/2026\"), instead of lines."),
+              service_from: z.string().optional().describe("Invoices: first day of the service period (YYYY-MM-DD), if it is a period."),
+              service_to: z.string().optional().describe("Invoices: service date or last day of the period (YYYY-MM-DD); default today."),
+              due_days: z.number().int().min(0).max(365).optional().describe("Invoices: payment term in days; default: from the partner."),
+              due_date: z.string().optional().describe("Invoices: due date (YYYY-MM-DD), instead of due_days."),
+            }
+          : {}),
         language: z.enum(["sl", "en"]).default("sl").describe("Language of the summary the user confirms."),
       }),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -88,16 +119,25 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
       run(async () => {
         const client = ctx.getClient();
         const installation = describeInstallation(client.baseUrl);
-        const { draft, warnings } = await buildOfferDraft(
-          {
-            client,
-            cache: ctx.cache,
-            drafts,
-            today: todayInLjubljana(ctx.now()),
-            installation: installation.isDefault ? undefined : installation.host,
-          },
-          args,
-        );
+        const buildCtx = {
+          client,
+          cache: ctx.cache,
+          drafts,
+          today: todayInLjubljana(ctx.now()),
+          installation: installation.isDefault ? undefined : installation.host,
+        };
+        const a = args as typeof args & Partial<Omit<InvoiceInput, "doc_type">> & { valid_days?: number };
+        let built: { draft: Draft; warnings: string[]; info?: InvoiceInfo };
+        if (a.doc_type === "sales_offer") {
+          const invoiceOnly = (["from_offer", "service_from", "service_to", "due_days", "due_date"] as const).filter((k) => a[k] !== undefined);
+          if (invoiceOnly.length) throw new DraftError(`${invoiceOnly.join(", ")}: only for invoices.`);
+          if (!a.partner_id) throw new DraftError("Give partner_id (from search_partners).");
+          built = await buildOfferDraft(buildCtx, { ...a, partner_id: a.partner_id, lines: a.lines ?? [] });
+        } else {
+          if (a.valid_days !== undefined) throw new DraftError("valid_days: only for offers.");
+          built = await buildInvoiceDraft(buildCtx, { ...a, doc_type: a.doc_type as InvoiceType });
+        }
+        const { draft, warnings, info } = built;
         return compact({
           draft_id: draft.id,
           expires_at: new Date(draft.expiresAt).toISOString(),
@@ -105,6 +145,7 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           partner: draft.partner,
           lines: draft.lines.map((l) => ({ product_id: l.productId, code: l.code, name: l.name, quantity: l.quantity, unit: l.unit, price: l.price, discount_percent: l.discountPercent, vat_percent: l.taxRatePercent, net: l.net, total: l.gross })),
           totals: draft.totals,
+          ...info,
           warnings,
           next: NEXT_STEP[settings.confirm],
         });
@@ -158,8 +199,8 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
               return {
                 status: "unknown",
                 message:
-                  `Several offers to this partner today match the draft (${found.candidates.join(", ")}). ` +
-                  "Ask the user to check in Metakocka whether one of them is this offer. Do not save it again; discard_draft when resolved.",
+                  `Several documents to this partner today match the draft (${found.candidates.join(", ")}). ` +
+                  "Ask the user to check in Metakocka whether one of them is this one. Do not save it again; discard_draft when resolved.",
               };
             }
             return found;

@@ -6,6 +6,7 @@
 import { getDocument, putDocument, searchDocuments, type MkRecord } from "../api.js";
 import type { MetakockaClient } from "../client.js";
 import { MetakockaError } from "../client.js";
+import { fromMkDate } from "../dates.js";
 import { asArray, num, str } from "../util.js";
 import type { Draft, DraftStore } from "./drafts.js";
 import type { Journal } from "./journal.js";
@@ -127,6 +128,10 @@ export function verifyStored(draft: Draft, doc: MkRecord): string[] {
   });
   const total = num(doc.sum_all);
   if (total !== undefined && !near(total, draft.totals.gross, 0.01)) problems.push(`total ${total}, not ${draft.totals.gross}`);
+  const due = fromMkDate(draft.payload.duo_payment);
+  if (due && fromMkDate(doc.duo_payment) && fromMkDate(doc.duo_payment) !== due) problems.push(`due date ${fromMkDate(doc.duo_payment)}, not ${due}`);
+  // Invoices are meant to stay not issued until the user issues them in Metakocka.
+  if (draft.docType !== "sales_offer" && str(doc.publish_ts)) problems.push("the invoice is already issued");
   return problems.length ? [`CHECK IN METAKOCKA — the stored document differs from what was confirmed: ${problems.join("; ")}.`] : [];
 }
 
