@@ -10,9 +10,16 @@ import { ConfigError, envValue } from "../config.js";
 export const WRITABLE_TYPES = {
   offers: ["sales_offer"],
   invoices: ["sales_bill_domestic", "sales_bill_foreign"],
+  purchase_invoices: ["purchase_bill_domestic", "purchase_bill_foreign"],
+  partners: ["partner"],
+  products: ["product"],
 } as const;
 export type WritableDocType = (typeof WRITABLE_TYPES)[keyof typeof WRITABLE_TYPES][number];
 export const INVOICE_TYPES: readonly WritableDocType[] = WRITABLE_TYPES.invoices;
+export const PURCHASE_TYPES: readonly WritableDocType[] = WRITABLE_TYPES.purchase_invoices;
+/** Register entries rather than documents: new partners and products. */
+export type RecordType = "partner" | "product";
+export const isRecordType = (t: WritableDocType): t is RecordType => t === "partner" || t === "product";
 
 export interface WriteSettings {
   docTypes: WritableDocType[];
@@ -33,9 +40,10 @@ export interface WriteSettings {
 const DEFAULT_WRITE_TIMEOUT_MS = 120_000;
 
 /**
- * METAKOCKA_WRITE=offers,invoices (or METAKOCKA_WRITE_OFFERS=true /
- * METAKOCKA_WRITE_INVOICES=true, what the Claude Desktop extension's
- * checkboxes set) enables the write tools for those documents. Returns
+ * METAKOCKA_WRITE=offers,invoices,purchase_invoices,partners,products (or
+ * METAKOCKA_WRITE_OFFERS / _INVOICES / _PURCHASE_INVOICES / _PARTNERS /
+ * _PRODUCTS=true, what the Claude Desktop extension's checkboxes set)
+ * enables the write tools for those documents and registers. Returns
  * undefined when writing is off. Throws ConfigError for values it doesn't
  * understand, so a typo never silently changes what the server may do.
  */
@@ -44,6 +52,9 @@ export function writeSettingsFromEnv(env: NodeJS.ProcessEnv = process.env): Writ
   const names = raw && !["off", "false", "0", "no"].includes(raw.toLowerCase()) ? raw.split(",") : [];
   if (flag(env, "METAKOCKA_WRITE_OFFERS")) names.push("offers");
   if (flag(env, "METAKOCKA_WRITE_INVOICES")) names.push("invoices");
+  if (flag(env, "METAKOCKA_WRITE_PURCHASE_INVOICES")) names.push("purchase_invoices");
+  if (flag(env, "METAKOCKA_WRITE_PARTNERS")) names.push("partners");
+  if (flag(env, "METAKOCKA_WRITE_PRODUCTS")) names.push("products");
   if (!names.length) return undefined;
 
   const docTypes: WritableDocType[] = [];

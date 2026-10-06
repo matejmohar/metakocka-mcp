@@ -1,5 +1,6 @@
 /**
- * Opt-in tools that create documents in Metakocka (METAKOCKA_WRITE): offers and invoices.
+ * Opt-in tools that create documents in Metakocka (METAKOCKA_WRITE): offers, invoices and received invoices,
+ * and register entries: partners and products. draft_partner / draft_product draft the latter.
  * draft_document builds and checks a document without saving it;
  * commit_document saves exactly that draft, after the user confirms it in
  * their client (see WriteSettings.confirm); discard_draft drops it.
@@ -12,9 +13,11 @@ import { commitDraft, resolveUnknown } from "../write/commit.js";
 import { DraftStore, type Draft } from "../write/drafts.js";
 import { createJournal, type Journal } from "../write/journal.js";
 import { DraftError, sameSummary } from "../write/document.js";
-import { buildInvoiceDraft, type InvoiceInfo, type InvoiceInput, type InvoiceType } from "../write/invoice.js";
-import { buildOfferDraft } from "../write/offer.js";
-import { INVOICE_TYPES, type WriteSettings } from "../write/settings.js";
+import { buildInvoiceDraft, type InvoiceInfo, type InvoiceInput } from "../write/invoice.js";
+import { buildOfferDraft, type OfferInput } from "../write/offer.js";
+import { buildPurchaseDraft, type PurchaseInfo, type PurchaseInput } from "../write/purchase.js";
+import { buildPartnerDraft, buildProductDraft } from "../write/records.js";
+import { INVOICE_TYPES, isRecordType, PURCHASE_TYPES, type WriteSettings } from "../write/settings.js";
 import { compact } from "../util.js";
 import { run, type ToolContext } from "./shared.js";
 
@@ -23,10 +26,17 @@ export interface WriteContext {
   /** Must outlive a single server instance: create it once per process (stdio) or per tenant (HTTP). */
   drafts: DraftStore;
   journal: Journal;
+  /** Whether draft_document may read files on this machine (attachments); never for the HTTP server. */
+  localFiles?: boolean;
 }
 
-export function createWriteContext(settings: WriteSettings, options: { logToStderr?: boolean } = {}): WriteContext {
-  return { settings, drafts: new DraftStore(), journal: createJournal(options.logToStderr ? undefined : settings.logPath) };
+export function createWriteContext(settings: WriteSettings, options: { logToStderr?: boolean; localFiles?: boolean } = {}): WriteContext {
+  return {
+    settings,
+    drafts: new DraftStore(),
+    journal: createJournal(options.logToStderr ? undefined : settings.logPath),
+    localFiles: options.localFiles ?? false,
+  };
 }
 
 const CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities";
@@ -50,33 +60,62 @@ const COMMIT_CONFIRMATION: Record<WriteSettings["confirm"], string> = {
 export function registerWriteTools(server: McpServer, ctx: ToolContext, write: WriteContext): void {
   const { settings, drafts, journal } = write;
 
+  const documentTypes = settings.docTypes.filter((t) => !isRecordType(t));
+  const partners = settings.docTypes.includes("partner");
+  const products = settings.docTypes.includes("product");
   const offers = settings.docTypes.includes("sales_offer");
   const invoices = settings.docTypes.some((t) => INVOICE_TYPES.includes(t));
-  const what = [offers && "an offer (ponudba / predračun)", invoices && "an invoice (račun, domestic or foreign)"].filter(Boolean).join(" or ");
+  const purchases = settings.docTypes.some((t) => PURCHASE_TYPES.includes(t));
+  const what = [
+    offers && "an offer (ponudba / predračun)",
+    invoices && "an invoice (račun, domestic or foreign)",
+    purchases && "a received invoice (prejeti račun) from a supplier's invoice",
+  ].filter(Boolean);
   const docTypeHelp = [
     offers && "sales_offer = ponudba (also used as predračun)",
     invoices && "sales_bill_domestic = račun for a domestic partner, sales_bill_foreign = tuji račun for a foreign partner",
+    purchases && "purchase_bill_domestic / purchase_bill_foreign = prejeti račun from a domestic / foreign supplier",
   ].filter(Boolean).join("; ");
+  const forDates = [invoices && "Invoices", purchases && "purchase invoices"].filter(Boolean).join(" and ");
 
-  server.registerTool(
+  /** Where a missing partner or product sends the user, depending on what may be added here. */
+  const missingHint = (error: unknown) => {
+    if (!(error instanceof DraftError)) return error;
+    let message = error.message;
+    if (partners && /never creates partners/.test(message)) message += " Or, if the user agrees, add it with draft_partner (data from the document) and then draft this again.";
+    if (products && /never creates products/.test(message)) message += " Or, if the user agrees, add it with draft_product and then draft this again.";
+    return message === error.message ? error : new DraftError(message);
+  };
+
+  if (documentTypes.length) server.registerTool(
     "draft_document",
     {
-      title: `Draft a document (${[offers && "offer", invoices && "invoice"].filter(Boolean).join(", ")})`,
+      title: `Draft a document (${[offers && "offer", invoices && "invoice", purchases && "received invoice"].filter(Boolean).join(", ")})`,
       description:
-        `Prepare ${what} in Metakocka WITHOUT saving it. Everything is linked to records that ` +
+        `Prepare ${what.join(", or ")} in Metakocka WITHOUT saving it. Everything is linked to records that ` +
         "already exist: the partner by its id (from search_partners) and products by their id (from search_products). " +
         "This tool never creates partners or products; if one is missing, tell the user to add it in Metakocka. " +
-        "Prices and VAT come from Metakocka's price list unless a price is given. " +
+        (offers || invoices
+          ? `${purchases ? `On ${[offers && "offers", invoices && "invoices"].filter(Boolean).join(" and ")}, prices` : "Prices"} and VAT come from Metakocka's price list unless a price is given. `
+          : "") +
         (invoices
           ? "Invoices are saved NOT issued: the user checks and issues (prints) them in Metakocka; they move no stock. " +
             "An invoice can also be made from an offer (from_offer: its lines, partner and a link to it). The payment term " +
             "comes from the partner (its term in Metakocka, else its last invoice) unless given. Foreign invoices take only " +
             "lines without VAT and, unless a note is given, the VAT note of the partner's last foreign invoice. "
           : "") +
+        (purchases
+          ? "Received invoices are copied from the supplier's invoice (e.g. a PDF the user gave you): supplier_invoice_number, " +
+            "invoice_date, invoice_total and every line with its net unit price, vat_percent and description. Book each line to " +
+            "a product marked for purchasing — the one the supplier's earlier invoices use (search_documents). Give a credit " +
+            "line as a negative price: Metakocka's API can't take it, so it is left out and the user adds it by hand. The lines " +
+            "must add up to invoice_total. Saving also makes the stock receipt (prevzemnica). Pass attachment_path to attach " +
+            "the supplier's PDF. An invoice number already entered for that supplier is refused. "
+          : "") +
         "Returns a draft_id and a summary: show the summary to the user, then call commit_document with the draft_id to save it. " +
         "Drafts expire after 15 minutes.",
       inputSchema: z.object({
-        doc_type: z.enum(settings.docTypes as [string, ...string[]]).describe(`${docTypeHelp}.`),
+        doc_type: z.enum(documentTypes as [string, ...string[]]).describe(`${docTypeHelp}.`),
         partner_id: z
           .string()
           .min(1)
@@ -92,23 +131,45 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
               product_id: z.string().optional().describe("Product's Metakocka id (the `id` from search_products)."),
               code: z.string().optional().describe("Exact product code (šifra), instead of product_id."),
               quantity: z.number().positive().max(1_000_000).optional(),
-              price: z.number().min(0).max(10_000_000).optional().describe("Net unit price in EUR; default: the product's price list."),
+              price: z
+                .number()
+                .min(purchases ? -10_000_000 : 0)
+                .max(10_000_000)
+                .optional()
+                .describe(
+                  "Net unit price in EUR; default: the product's price list." + (purchases ? " Purchase invoices: as on the invoice, required; negative for a credit line." : ""),
+                ),
               discount_percent: z.number().min(0).max(100).optional(),
+              ...(purchases
+                ? {
+                    vat_percent: z.number().min(0).max(100).optional().describe("Purchase invoices: the line's VAT rate as on the invoice (e.g. 22, 9.5, 0)."),
+                    description: z.string().max(200).optional().describe("Purchase invoices: the line's text on the invoice (e.g. a period or domain)."),
+                  }
+                : {}),
             }),
           )
           .min(1)
           .max(50)
           .optional(),
-        title: z.string().max(100).optional().describe("Document title (naziv)."),
-        note: z.string().max(1000).optional().describe("Note printed on the document."),
+        ...(offers || invoices ? { title: z.string().max(100).optional().describe("Document title (naziv).") } : {}),
+        note: z.string().max(1000).optional().describe("Note on the document."),
         ...(offers ? { valid_days: z.number().int().min(1).max(365).optional().describe("Offers: how many days the offer is valid (default 30).") } : {}),
-        ...(invoices
+        ...(invoices ? { from_offer: z.string().min(1).optional().describe("Invoices: number of the offer to invoice (e.g. \"4/2026\"), instead of lines.") } : {}),
+        ...(invoices || purchases
           ? {
-              from_offer: z.string().min(1).optional().describe("Invoices: number of the offer to invoice (e.g. \"4/2026\"), instead of lines."),
-              service_from: z.string().optional().describe("Invoices: first day of the service period (YYYY-MM-DD), if it is a period."),
-              service_to: z.string().optional().describe("Invoices: service date or last day of the period (YYYY-MM-DD); default today."),
-              due_days: z.number().int().min(0).max(365).optional().describe("Invoices: payment term in days; default: from the partner."),
-              due_date: z.string().optional().describe("Invoices: due date (YYYY-MM-DD), instead of due_days."),
+              service_from: z.string().optional().describe(`${forDates}: first day of the service period (YYYY-MM-DD), if it is a period.`),
+              service_to: z.string().optional().describe(`${forDates}: service date or last day of the period (YYYY-MM-DD).`),
+              due_days: z.number().int().min(0).max(365).optional().describe(`${forDates}: payment term in days; default: from the partner.`),
+              due_date: z.string().optional().describe(`${forDates}: due date (YYYY-MM-DD), instead of due_days.`),
+            }
+          : {}),
+        ...(purchases
+          ? {
+              supplier_invoice_number: z.string().min(1).max(100).optional().describe("Purchase invoices: the invoice number as printed on the supplier's invoice."),
+              invoice_date: z.string().optional().describe("Purchase invoices: the date on the supplier's invoice (YYYY-MM-DD)."),
+              received_date: z.string().optional().describe("Purchase invoices: when it was received (YYYY-MM-DD); default invoice_date."),
+              invoice_total: z.number().optional().describe("Purchase invoices: the total with VAT as printed on the invoice, credit lines included."),
+              attachment_path: z.string().optional().describe("Purchase invoices: absolute path of the supplier's invoice file (PDF), attached once saved."),
             }
           : {}),
         language: z.enum(["sl", "en"]).default("sl").describe("Language of the summary the user confirms."),
@@ -126,16 +187,39 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           today: todayInLjubljana(ctx.now()),
           installation: installation.isDefault ? undefined : installation.host,
         };
-        const a = args as typeof args & Partial<Omit<InvoiceInput, "doc_type">> & { valid_days?: number };
-        let built: { draft: Draft; warnings: string[]; info?: InvoiceInfo };
-        if (a.doc_type === "sales_offer") {
-          const invoiceOnly = (["from_offer", "service_from", "service_to", "due_days", "due_date"] as const).filter((k) => a[k] !== undefined);
-          if (invoiceOnly.length) throw new DraftError(`${invoiceOnly.join(", ")}: only for invoices.`);
-          if (!a.partner_id) throw new DraftError("Give partner_id (from search_partners).");
-          built = await buildOfferDraft(buildCtx, { ...a, partner_id: a.partner_id, lines: a.lines ?? [] });
-        } else {
-          if (a.valid_days !== undefined) throw new DraftError("valid_days: only for offers.");
-          built = await buildInvoiceDraft(buildCtx, { ...a, doc_type: a.doc_type as InvoiceType });
+        const a = args as Record<string, unknown> & { doc_type: string; lines?: Record<string, unknown>[] };
+        const kind = a.doc_type === "sales_offer" ? "offer" : a.doc_type.startsWith("sales_bill_") ? "invoice" : "purchase";
+        // Fields that belong to other kinds of documents are refused rather than silently ignored.
+        const allowed: Record<string, readonly string[]> = {
+          valid_days: ["offer"],
+          title: ["offer", "invoice"],
+          from_offer: ["invoice"],
+          service_from: ["invoice", "purchase"],
+          service_to: ["invoice", "purchase"],
+          due_days: ["invoice", "purchase"],
+          due_date: ["invoice", "purchase"],
+          supplier_invoice_number: ["purchase"],
+          invoice_date: ["purchase"],
+          received_date: ["purchase"],
+          invoice_total: ["purchase"],
+          attachment_path: ["purchase"],
+        };
+        const misplaced = Object.keys(allowed).filter((k) => a[k] !== undefined && !allowed[k]!.includes(kind));
+        if (kind !== "purchase" && a.lines?.some((l) => l.vat_percent !== undefined || l.description !== undefined)) misplaced.push("lines[].vat_percent / description");
+        if (misplaced.length) throw new DraftError(`${misplaced.join(", ")}: not for ${a.doc_type}.`);
+
+        let built: { draft: Draft; warnings: string[]; info?: InvoiceInfo | PurchaseInfo };
+        try {
+          if (kind === "offer") {
+            if (!a.partner_id) throw new DraftError("Give partner_id (from search_partners).");
+            built = await buildOfferDraft(buildCtx, { ...(a as unknown as OfferInput), lines: (a.lines ?? []) as OfferInput["lines"] });
+          } else if (kind === "invoice") {
+            built = await buildInvoiceDraft(buildCtx, a as unknown as InvoiceInput);
+          } else {
+            built = await buildPurchaseDraft({ ...buildCtx, localFiles: write.localFiles === true }, a as unknown as PurchaseInput);
+          }
+        } catch (error) {
+          throw missingHint(error);
         }
         const { draft, warnings, info } = built;
         return compact({
@@ -151,6 +235,71 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
         });
       }),
   );
+
+  const recordContext = () => {
+    const client = ctx.getClient();
+    const installation = describeInstallation(client.baseUrl);
+    return { client, cache: ctx.cache, drafts, today: todayInLjubljana(ctx.now()), installation: installation.isDefault ? undefined : installation.host };
+  };
+  const recordAnswer = ({ draft, warnings }: { draft: Draft; warnings: string[] }) =>
+    compact({ draft_id: draft.id, expires_at: new Date(draft.expiresAt).toISOString(), summary: draft.summary, warnings, next: NEXT_STEP[settings.confirm] });
+
+  if (partners) {
+    server.registerTool(
+      "draft_partner",
+      {
+        title: "Draft a new partner",
+        description:
+          "Prepare a new partner (supplier or customer) for Metakocka WITHOUT saving it — only when the user agrees to add one " +
+          "that search_partners doesn't find. Copy its data from its documents (e.g. the supplier's invoice): name, address, " +
+          "tax number, whether it is a company and VAT registered. A partner with the same tax number is refused; similar names " +
+          "are shown. Partners can't be deleted through the API, so get this right. Returns a draft_id and a summary: show it, " +
+          "then commit_document; the answer has the new partner's id and address_id.",
+        inputSchema: z.object({
+          name: z.string().min(1).max(100).describe("Name as on its documents (naziv)."),
+          street: z.string().min(1).max(150),
+          post_number: z.string().min(1).max(20),
+          city: z.string().min(1).max(100),
+          country: z.string().max(50).optional().describe('Country name, e.g. "Slovenija" (default), "Ireland".'),
+          tax_id: z.string().max(50).optional().describe("Tax / VAT number (davčna številka), e.g. SI12345678; required for a company."),
+          registration_number: z.string().max(50).optional().describe("Registration number (matična številka), if on its documents."),
+          business_entity: z.boolean().describe("true for a company or s.p., false for a private person."),
+          taxpayer: z.boolean().describe("VAT registered (davčni zavezanec), e.g. its tax number starts with SI / the invoice charges VAT as a VAT payer."),
+          role: z.enum(["supplier", "buyer", "both"]).describe("supplier (dobavitelj), buyer (kupec) or both."),
+          email: z.string().max(255).optional(),
+          language: z.enum(["sl", "en"]).default("sl").describe("Language of the summary the user confirms."),
+        }),
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async (args) => run(async () => recordAnswer(await buildPartnerDraft(recordContext(), args))),
+    );
+  }
+
+  if (products) {
+    server.registerTool(
+      "draft_product",
+      {
+        title: "Draft a new product",
+        description:
+          "Prepare a new product (artikel) for Metakocka WITHOUT saving it — only when the user agrees to add one that " +
+          "search_products doesn't find, e.g. to book a received invoice's line to. A product with the same code or name is " +
+          "refused; similar ones are shown, so prefer an existing general product (e.g. one for equipment) when it fits. " +
+          "No price list is made. Returns a draft_id and a summary: show it, then commit_document; the answer has the new product's id.",
+        inputSchema: z.object({
+          name: z.string().min(1).max(200).describe("Product name (naziv artikla)."),
+          code: z.string().min(1).max(20).describe("Short unique code (šifra), in the style of the existing codes."),
+          unit: z.string().min(1).max(20).describe('Unit from Metakocka\'s register, e.g. "kos", "ura", "mesec", "kpl".'),
+          service: z.boolean().describe("true for a service, false for goods (blago)."),
+          purchasing: z.boolean().optional().describe("Used on received invoices (nabavni)."),
+          sales: z.boolean().optional().describe("Used on offers and invoices (prodajni)."),
+          description: z.string().max(700).optional().describe("Longer description (dodatni opis)."),
+          language: z.enum(["sl", "en"]).default("sl").describe("Language of the summary the user confirms."),
+        }),
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async (args) => run(async () => recordAnswer(await buildProductDraft(recordContext(), args))),
+    );
+  }
 
   server.registerTool(
     "commit_document",
@@ -199,10 +348,11 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
               return {
                 status: "unknown",
                 message:
-                  `Several documents to this partner today match the draft (${found.candidates.join(", ")}). ` +
+                  `Several documents to this partner on that date match the draft (${found.candidates.join(", ")}). ` +
                   "Ask the user to check in Metakocka whether one of them is this one. Do not save it again; discard_draft when resolved.",
               };
             }
+            if (found.status === "created") ctx.cache.clear();
             return found;
           });
       }
@@ -236,7 +386,12 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
         }
       }
 
-      return run(() => commitDraft(commitCtx, draft));
+      return run(async () => {
+        const outcome = await commitDraft(commitCtx, draft);
+        // New records must show up in searches and the catalogue right away.
+        if (outcome.status === "created") ctx.cache.clear();
+        return outcome;
+      });
     },
   );
 

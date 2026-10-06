@@ -191,6 +191,15 @@ export async function putDocument(client: MetakockaClient, payload: MkRecord, ti
 }
 
 /**
+ * Attach a file to a document. This endpoint lives next to the API's base path
+ * (/rest/eshop/add_attachment, not /rest/eshop/v1/...). Not retried: a retry
+ * could attach the file twice.
+ */
+export async function addAttachment(client: MetakockaClient, docType: DocType, mkId: string, fileName: string, dataB64: string, timeoutMs: number): Promise<void> {
+  await client.call("../add_attachment", { doc_type: docType, mk_id: mkId, attachment_list: [{ file_name: fileName, data_b64: dataB64 }] }, { idempotent: false, timeoutMs });
+}
+
+/**
  * Find a document by its number as shown in Metakocka (count_code, e.g.
  * "PP-18495" or "1-MK-2344"). Returns undefined when there's no exact match.
  */

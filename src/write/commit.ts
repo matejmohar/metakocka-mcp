@@ -3,13 +3,17 @@
  * Metakocka stored what the user confirmed. A call that didn't answer leaves
  * the draft "unknown" until a search shows whether the document exists.
  */
-import { getDocument, putDocument, searchDocuments, type MkRecord } from "../api.js";
+import { addAttachment, getDocument, putDocument, searchDocuments, type MkRecord } from "../api.js";
 import type { MetakockaClient } from "../client.js";
 import { MetakockaError } from "../client.js";
 import { fromMkDate } from "../dates.js";
 import { asArray, num, str } from "../util.js";
 import type { Draft, DraftStore } from "./drafts.js";
 import type { Journal } from "./journal.js";
+import { commitRecord, resolveUnknownRecord } from "./records.js";
+import { isRecordType, type RecordType, type WritableDocType } from "./settings.js";
+
+type DocumentType = Exclude<WritableDocType, RecordType>;
 
 export interface CommitContext {
   client: MetakockaClient;
@@ -21,11 +25,12 @@ export interface CommitContext {
 }
 
 export type CommitOutcome =
-  | { status: "created"; number?: string; mk_id: string; total: number; currency: string; warnings: string[] }
+  | { status: "created"; number?: string; mk_id: string; total?: number; currency?: string; address_id?: string; warnings: string[] }
   | { status: "rejected"; message: string }
   | { status: "unknown"; message: string };
 
 export async function commitDraft(ctx: CommitContext, draft: Draft): Promise<CommitOutcome> {
+  if (isRecordType(draft.docType)) return commitRecord(ctx, draft);
   const base = { draft_id: draft.id, doc_type: draft.docType, installation: ctx.installation };
   draft.status = "committing";
   await ctx.journal({ ...base, event: "attempt", payload: draft.payload });
@@ -57,8 +62,10 @@ export async function commitDraft(ctx: CommitContext, draft: Draft): Promise<Com
 
 /** After an unknown outcome: look for the document before anything else may happen with this draft. */
 export async function resolveUnknown(ctx: CommitContext, draft: Draft): Promise<CommitOutcome | { status: "not_found" } | { status: "ambiguous"; candidates: string[] }> {
+  const docType = draft.docType;
+  if (isRecordType(docType)) return resolveUnknownRecord(ctx, draft);
   const { documents } = await searchDocuments(ctx.client, {
-    docType: draft.docType,
+    docType,
     dateFrom: draft.docDate,
     dateTo: draft.docDate,
     filters: [{ type: "partner_mk_id", value: draft.partner.id }],
@@ -88,15 +95,25 @@ export async function resolveUnknown(ctx: CommitContext, draft: Draft): Promise<
 }
 
 async function finishCommitted(ctx: CommitContext, draft: Draft, mkId: string, number: string | undefined, warnings: string[]): Promise<CommitOutcome> {
+  const docType = draft.docType as DocumentType;
   draft.status = "committed";
   draft.result = { mkId, number };
   const base = { draft_id: draft.id, doc_type: draft.docType, installation: ctx.installation };
   try {
-    warnings.push(...verifyStored(draft, await getDocument(ctx.client, draft.docType, mkId)));
+    warnings.push(...verifyStored(draft, await getDocument(ctx.client, docType, mkId)));
   } catch (error) {
     warnings.push(`The document was saved, but reading it back to check it failed: ${error instanceof Error ? error.message : String(error)}`);
   }
-  await ctx.journal({ ...base, event: "committed", mk_id: mkId, number, warnings });
+  const file = draft.attachment;
+  if (file && !file.attached) {
+    try {
+      await addAttachment(ctx.client, docType, mkId, file.fileName, file.dataB64, ctx.timeoutMs);
+      file.attached = true;
+    } catch (error) {
+      warnings.push(`The document was saved, but attaching ${file.fileName} failed; attach it in Metakocka: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  await ctx.journal({ ...base, event: "committed", mk_id: mkId, number, warnings, ...(file ? { attachment: { file_name: file.fileName, bytes: file.bytes, attached: !!file.attached } } : {}) });
   return { status: "created", number, mk_id: mkId, total: draft.totals.gross, currency: draft.totals.currency, warnings };
 }
 
@@ -131,7 +148,10 @@ export function verifyStored(draft: Draft, doc: MkRecord): string[] {
   const due = fromMkDate(draft.payload.duo_payment);
   if (due && fromMkDate(doc.duo_payment) && fromMkDate(doc.duo_payment) !== due) problems.push(`due date ${fromMkDate(doc.duo_payment)}, not ${due}`);
   // Invoices are meant to stay not issued until the user issues them in Metakocka.
-  if (draft.docType !== "sales_offer" && str(doc.publish_ts)) problems.push("the invoice is already issued");
+  if (draft.docType.startsWith("sales_bill_") && str(doc.publish_ts)) problems.push("the invoice is already issued");
+  // Purchase invoices carry the supplier's own number.
+  const number = str(draft.payload.count_code);
+  if (draft.docType.startsWith("purchase_bill_") && number && str(doc.count_code) && str(doc.count_code) !== number) problems.push(`number ${str(doc.count_code)}, not ${number}`);
   return problems.length ? [`CHECK IN METAKOCKA — the stored document differs from what was confirmed: ${problems.join("; ")}.`] : [];
 }
 

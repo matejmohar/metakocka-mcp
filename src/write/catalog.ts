@@ -18,6 +18,7 @@ export interface CatalogProduct {
   unit?: string;
   active: boolean;
   sales: boolean;
+  purchasing: boolean;
   /** Net sales price from the one applicable price list entry, when there is exactly one. */
   price?: number;
   /** Discount on that price list entry, in percent. */
@@ -72,6 +73,7 @@ export function toCatalogProduct(p: MkRecord, today: string): CatalogProduct {
     unit: str(p.unit),
     active: bool(p.activated ?? p.active) !== false,
     sales: bool(p.sales) === true,
+    purchasing: bool(p.purchasing) === true,
     price: one ? num(one.price) : undefined,
     discountPercent: one ? num(one.discount) : undefined,
     taxCode: taxCodes.length === 1 ? taxCodes[0] : undefined,

@@ -155,7 +155,7 @@ export async function buildInvoiceDraft(
           "Ask the user for the payment term and pass due_days (or due_date).",
       );
     }
-    [dueDate, dueFrom] = [addDays(ctx.today, days), `${days} days, as on the partner's last invoice ${str(last!.count_code)}`];
+    [dueDate, dueFrom] = [addDays(ctx.today, days), `${days === 1 ? "1 day" : `${days} days`}, as on the partner's last invoice ${str(last!.count_code)}`];
   }
 
   // Note: given, or on a foreign invoice the VAT note of the partner's last foreign invoice.

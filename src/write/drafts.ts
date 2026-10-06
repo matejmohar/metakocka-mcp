@@ -57,8 +57,10 @@ export interface Draft {
   payload: MkRecord;
   /** One-paragraph summary the user confirms. */
   summary: string;
+  /** A file to attach once the document is saved (purchase invoices: the supplier's PDF). Never logged. */
+  attachment?: { fileName: string; dataB64: string; bytes: number; attached?: boolean };
   /** Set once committed. */
-  result?: { mkId?: string; number?: string };
+  result?: { mkId?: string; number?: string; /** A new partner's address. */ addressId?: string };
 }
 
 export const DRAFT_TTL_MS = 15 * 60_000;
