@@ -62,12 +62,16 @@ const WAREHOUSES = {
 };
 
 describe("MCP server", () => {
-  it("lists all tools; all read-only except the PDF tool, which only writes a local file", async () => {
+  it("lists all tools; all read-only except the PDF and export tools, which only write a local file", async () => {
     const { client } = await setup({});
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
+      "accounting_export",
       "find_by_tracking_code",
+      "get_bank_balances",
       "get_bank_statements",
+      "get_cash_register",
+      "get_compensations",
       "get_document",
       "get_document_pdf",
       "get_partner",
@@ -87,7 +91,7 @@ describe("MCP server", () => {
       "stock_valuation",
     ]);
     for (const tool of tools) {
-      expect(tool.annotations?.readOnlyHint, tool.name).toBe(tool.name !== "get_document_pdf");
+      expect(tool.annotations?.readOnlyHint, tool.name).toBe(tool.name !== "get_document_pdf" && tool.name !== "accounting_export");
       expect(tool.annotations?.destructiveHint, tool.name).toBe(false);
       expect(tool.description, tool.name).toBeTruthy();
     }
@@ -893,6 +897,132 @@ describe("MCP server", () => {
       accounts: [{ account: "SI56", money_in: 100, money_out: 0, closing: 1100 }],
       transactions: [{ partner: "ACME", direction: "in", amount: 100 }],
     });
+  });
+
+  it("get_bank_balances lists each account's last balance and flags old statements", async () => {
+    const { client } = await setup({
+      get_bank_statement_status: () => ({
+        opr_code: "0",
+        statement_list: [
+          { ttr: "SI56 0231", currency: "EUR", last_statement_count_code: "129", last_statement_date: "02.10.2026", finished_state: "14737.52" },
+          { ttr: "SI56 0400", currency: "EUR", last_statement_count_code: "12", last_statement_date: "2026-08-31+02:00", finished_state: "262.48" },
+        ],
+      }),
+    });
+    const data = json(await client.callTool({ name: "get_bank_balances", arguments: {} }));
+    expect(data.accounts).toEqual([
+      { account: "SI56 0231", currency: "EUR", balance: 14737.52, last_statement: "129", last_statement_date: "2026-10-02", days_since_last_statement: 3 },
+      { account: "SI56 0400", currency: "EUR", balance: 262.48, last_statement: "12", last_statement_date: "2026-08-31", days_since_last_statement: 35 },
+    ]);
+    expect(data.total_by_currency).toEqual({ EUR: 15000 });
+    expect(data.note).toMatch(/SI56 0400/);
+  });
+
+  it("get_compensations lists what each compensation settled", async () => {
+    const { client, calls } = await setup({
+      "json/get_bank_compensation": () => ({
+        opr_code: "0",
+        result_count: "2",
+        result: [
+          { doc_date: "2026-04-02+02:00", doc_id: "1", confirmed: "false", compensation_amount: "0", partner_desc: "Partner 123", count_code: "BK-8" },
+          {
+            doc_date: "2026-03-01+02:00",
+            doc_id: "2",
+            confirmed: "true",
+            compensation_amount: "1.22",
+            partner_id: "9",
+            partner_desc: "ACME d.o.o.",
+            count_code: "BK-7",
+            purchase_bill_list: [{ count_code: "ddv1", doc_date: "2026-02-24+02:00", currency_code: "EUR", sum_all: "1.22", compensation_amount: "1.22" }],
+            sales_bill_list: [{ count_code: "PRD1_215", doc_date: "2026-02-20+02:00", currency_code: "EUR", sum_all: "122", compensation_amount: "1.22" }],
+          },
+        ],
+      }),
+    });
+    const data = json(await client.callTool({ name: "get_compensations", arguments: { date_from: "2026-01-01", partner: "acme" } }));
+    expect(calls[0]!.body).toMatchObject({ doc_date_from: "01.01.2026", doc_date_to: "05.10.2026" });
+    expect(data).toMatchObject({
+      total: 1.22,
+      unconfirmed: 0,
+      compensations: [
+        {
+          number: "BK-7",
+          partner: "ACME d.o.o.",
+          amount: 1.22,
+          confirmed: true,
+          our_invoices: [{ number: "PRD1_215", total: 122, compensated: 1.22 }],
+          their_invoices: [{ number: "ddv1", total: 1.22, compensated: 1.22 }],
+        },
+      ],
+    });
+  });
+
+  it("get_cash_register reconciles each journal, counting the bank deposit as money out", async () => {
+    const { client, calls } = await setup({
+      "json/cash_register_journal": () => ({
+        opr_code: "0",
+        cash_register_journal_count: "1",
+        cash_register_journal_list: [
+          {
+            doc_date: "2026-09-27+02:00",
+            code: "170",
+            cash_register: "Blagajna 4",
+            initial_state: "4658.69",
+            final_state: "5049.01",
+            deposit: "100",
+            transactions: [
+              { type: "Prejemek", partner: "TRGOVINA, D.O.O.", document: "1-MK-1935", amount: "165.35", payment_type: "Gotovina" },
+              { type: "Izdatek", partner: "TRGOVINA, D.O.O.", document: "MK-211", amount: "36" },
+              { type: "Prejemek - avans", partner: "TRGOVINA, D.O.O.", document: "PP-27203", amount: "365.35" },
+              { type: "Izdatek - avans", partner: "TRGOVINA, D.O.O.", document: "doc1", amount: "4.38" },
+              { type: "Vračilo - prodaja", partner: "TRGOVINA, D.O.O.", document: "PP-27178", amount: "0" },
+            ],
+          },
+        ],
+      }),
+    });
+    const data = json(await client.callTool({ name: "get_cash_register", arguments: { cash_register: "Blagajna 4" } }));
+    expect(calls[0]!.body).toMatchObject({ cash_register: "Blagajna 4", doc_date_from: "05.09.2026" });
+    expect(data.registers).toEqual([
+      { register: "Blagajna 4", currency: "EUR", statements: 1, opening: 4658.69, closing: 5049.01, money_in: 530.7, money_out: 140.38, net_change: 390.32 },
+    ]);
+    expect(data.journals_not_reconciled).toBeUndefined();
+    expect(data.transactions[0]).toMatchObject({ register: "Blagajna 4", journal: "170", direction: "out", amount: 100 });
+  });
+
+  it("accounting_export sends the profiles and saves the ZIP it links to", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mk-export-"));
+    const url = "https://bucket.s3.example.com/izdani_racuni_SI1_2026_10_05.zip?X-Amz-Expires=3599";
+    const fetchFile = (async (input: string | URL | Request) => {
+      expect(String(input)).toBe(url);
+      return new Response(new Uint8Array([80, 75, 3, 4]), { status: 200 });
+    }) as typeof fetch;
+    const { client, calls } = await setup(
+      { accounting_export: () => ({ opr_code: "0", result_url: url, job_id: "267" }) },
+      { pdfDir: dir, fetchFile },
+    );
+    const result = await client.callTool({ name: "accounting_export", arguments: { profiles: ["Izdani računi Vasco - domači"] } });
+    expect(calls[0]!.body).toMatchObject({
+      profile_name_list: ["Izdani računi Vasco - domači"],
+      from_date: "01.09.2026",
+      to_date: "30.09.2026",
+      export_attachment: "false",
+    });
+    const data = json(result);
+    expect(data).toMatchObject({ period: { from: "2026-09-01", to: "2026-09-30" }, job_id: "267", download_url: url });
+    expect(data.saved_to).toBe(join(dir, "izdani_racuni_SI1_2026_10_05.zip"));
+    expect([...(await readFile(data.saved_to))]).toEqual([80, 75, 3, 4]);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("accounting_export explains a wrong profile name", async () => {
+    const { client, calls } = await setup({
+      accounting_export: () => ({ opr_code: "1", error_desc: "java.lang.NullPointerException", job_id: "265" }),
+    });
+    const result = await client.callTool({ name: "accounting_export", arguments: { profiles: ["nope"], date_from: "2026-01-01", date_to: "2026-03-31" } });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(/profile name is wrong/);
+    expect(calls).toHaveLength(1); // never retried: a retry would queue a second export
   });
 
   it("stock_movements skips retail bills that were shipped with a packing list", async () => {

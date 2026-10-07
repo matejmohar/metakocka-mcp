@@ -391,3 +391,92 @@ export async function listBankStatements(
   }
   return { statements, truncated: true };
 }
+
+/** Closing balance of every bank account, from its last statement (get_bank_statement_status). */
+export async function bankStatementStatus(client: MetakockaClient): Promise<MkRecord[]> {
+  const response = await client.call("get_bank_statement_status");
+  return asArray<MkRecord>(response.statement_list);
+}
+
+/** Every record of a paged json/ list endpoint dated in [dateFrom, dateTo], up to `max`. */
+async function listDated(
+  client: MetakockaClient,
+  endpoint: string,
+  listKey: string,
+  q: { dateFrom: string; dateTo: string; max: number; extra?: MkRecord },
+  onPage?: (fetched: number) => void,
+): Promise<{ records: MkRecord[]; truncated: boolean }> {
+  const records: MkRecord[] = [];
+  while (records.length < q.max) {
+    const limit = Math.min(BANK_PAGE_MAX, q.max - records.length);
+    const response = await client.call(endpoint, {
+      doc_date_from: toMkDate(q.dateFrom),
+      doc_date_to: toMkDate(q.dateTo),
+      limit,
+      offset: records.length,
+      ...q.extra,
+    });
+    const page = asArray<MkRecord>(response[listKey]);
+    records.push(...page);
+    onPage?.(records.length);
+    if (page.length < limit) return { records, truncated: false };
+  }
+  return { records, truncated: true };
+}
+
+/** Compensations (kompenzacije): invoices settled against each other instead of paid. */
+export function listCompensations(
+  client: MetakockaClient,
+  q: { dateFrom: string; dateTo: string; max: number },
+  onPage?: (fetched: number) => void,
+): Promise<{ records: MkRecord[]; truncated: boolean }> {
+  return listDated(client, "json/get_bank_compensation", "result", q, onPage);
+}
+
+/** Cash register journals (blagajniški dnevniki), one per register and day, with their transactions. */
+export function listCashRegisterJournals(
+  client: MetakockaClient,
+  q: { dateFrom: string; dateTo: string; max: number; cashRegister?: string },
+  onPage?: (fetched: number) => void,
+): Promise<{ records: MkRecord[]; truncated: boolean }> {
+  const extra = q.cashRegister ? { cash_register: q.cashRegister } : undefined;
+  return listDated(client, "json/cash_register_journal", "cash_register_journal_list", { ...q, extra }, onPage);
+}
+
+/**
+ * Run an accounting export (izvoz za računovodstvo) with profiles defined in
+ * Metakocka. Answers with a link to a ZIP file, valid for an hour. Metakocka
+ * runs one export at a time and an export can take a while, so it is never
+ * retried (a retry would only queue a second export).
+ */
+export async function accountingExport(
+  client: MetakockaClient,
+  q: { profiles: string[]; dateFrom: string; dateTo: string; attachments: boolean; timeoutMs: number },
+): Promise<{ url: string; jobId?: string }> {
+  let response: MkRecord;
+  try {
+    response = await client.call(
+      "accounting_export",
+      {
+        profile_name_list: q.profiles,
+        from_date: toMkDate(q.dateFrom),
+        to_date: toMkDate(q.dateTo),
+        export_attachment: String(q.attachments),
+      },
+      { idempotent: false, timeoutMs: q.timeoutMs },
+    );
+  } catch (error) {
+    // An unknown profile name makes Metakocka fail with a bare NullPointerException.
+    if (error instanceof MetakockaError && /NullPointerException/.test(error.message)) {
+      throw new MetakockaError(
+        `Metakocka could not run the export: ${error.message}. Usually a profile name is wrong — use the profile names ` +
+          "(or ids) exactly as under Settings → Accounting export (Nastavitve → Izvoz v računovodstvo) in Metakocka.",
+        error.oprCode,
+      );
+    }
+    throw error;
+  }
+  const url = str(response.result_url);
+  if (!url) throw new MetakockaError("Metakocka finished the export but returned no file.");
+  return { url, jobId: str(response.job_id) };
+}

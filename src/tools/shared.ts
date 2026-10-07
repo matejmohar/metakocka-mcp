@@ -18,6 +18,8 @@ export interface ToolContext {
   now: () => Date;
   /** Shared by all tools of one server; see cache.ts. */
   cache: TtlCache;
+  /** Downloads files Metakocka links to (accounting exports); injected for tests. Defaults to fetch. */
+  fetchFile?: typeof fetch;
 }
 
 /** Warehouses change rarely and several tools need them to resolve names. */

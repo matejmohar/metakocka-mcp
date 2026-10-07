@@ -207,7 +207,8 @@ export class MetakockaClient {
 
     const oprCode = (data as Json).opr_code;
     if (oprCode !== undefined && String(oprCode) !== "0") {
-      const desc = (data as Json).opr_desc;
+      // Most endpoints describe the error in opr_desc; a few newer ones (accounting_export) in error_desc.
+      const desc = (data as Json).opr_desc ?? (data as Json).error_desc;
       throw new MetakockaError(
         `Metakocka error (${endpoint}): ${this.redact(String(desc ?? `opr_code ${String(oprCode)}`))}`,
         String(oprCode),

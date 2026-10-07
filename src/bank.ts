@@ -1,7 +1,7 @@
-/** Pure calculations for bank statements (izpiski). */
+/** Pure calculations for bank statements (izpiski) and cash register journals (blagajniški dnevniki), which have the same shape. */
 import type { MkRecord } from "./api.js";
-import { fromMkDate } from "./dates.js";
-import { asArray, compact, num, numSl, round2, str } from "./util.js";
+import { daysBetween, fromMkDate } from "./dates.js";
+import { asArray, bool, compact, num, numSl, round2, str } from "./util.js";
 
 export interface BankTransaction {
   date?: string;
@@ -18,9 +18,14 @@ export interface BankTransaction {
   payment_type?: string;
 }
 
-/** "Prejemek" (receipt) is money in, "Izdatek" (expense) money out; both may carry a suffix like " - avans". */
+/**
+ * "Prejemek" (receipt) is money in, "Izdatek" (expense) money out; both may carry a suffix like " - avans".
+ * In a cash register, "Vračilo - prodaja" refunds a customer (out) and "Vračilo - nabava" is a supplier's refund (in).
+ */
 function directionOf(type: string | undefined): "in" | "out" | undefined {
   const t = type?.toLowerCase() ?? "";
+  if (t.startsWith("vračilo - prodaja")) return "out";
+  if (t.startsWith("vračilo - nabava")) return "in";
   if (t.startsWith("prejemek") || t.startsWith("priliv")) return "in";
   if (t.startsWith("izdatek") || t.startsWith("odliv")) return "out";
   return undefined;
@@ -61,7 +66,7 @@ function statementTransactions(statement: MkRecord): { transactions: BankTransac
     compact({
       date: fromMkDate(statement.doc_date),
       statement: str(statement.code),
-      account: str(statement.bank_account),
+      account: accountOf(statement),
       direction,
       amount,
       currency: str(statement.currency) ?? "EUR",
@@ -75,6 +80,9 @@ function statementTransactions(statement: MkRecord): { transactions: BankTransac
   );
   return { transactions, reconciled };
 }
+
+/** A bank statement's account, or a cash register journal's register. */
+const accountOf = (statement: MkRecord) => str(statement.bank_account) ?? str(statement.cash_register);
 
 export interface BankFilter {
   direction?: "in" | "out";
@@ -96,7 +104,7 @@ export function bankSummary(statements: MkRecord[], filter: BankFilter = {}) {
 
   for (const st of sorted) {
     const currency = str(st.currency) ?? "EUR";
-    const account = str(st.bank_account) ?? "(unknown account)";
+    const account = accountOf(st) ?? "(unknown account)";
     const key = `${account}|${currency}`;
     const a = accounts.get(key) ?? { account, currency, statements: 0, money_in: 0, money_out: 0 };
     a.statements++;
@@ -138,5 +146,86 @@ export function bankSummary(statements: MkRecord[], filter: BankFilter = {}) {
       .slice(0, 15),
     transactions: matching,
     ...(unreconciled.length ? { statements_not_reconciled: unreconciled } : {}),
+  };
+}
+
+/**
+ * A cash register journal as a statement bankSummary understands. Its deposit
+ * (polog) is cash taken from the register to the bank: money out, which the
+ * journal lists apart from its transactions.
+ */
+export function cashJournalAsStatement(journal: MkRecord): MkRecord {
+  const deposit = num(journal.deposit);
+  const transactions = asArray<MkRecord>(journal.transactions);
+  return {
+    ...journal,
+    transactions: deposit ? [...transactions, { type: "Izdatek - polog na banko", amount: String(deposit), description: "Deposit to the bank (polog)" }] : transactions,
+  };
+}
+
+/** Bank account balances from get_bank_statement_status, with how old the last statement is. */
+export function bankBalances(rows: MkRecord[], today: string) {
+  const accounts = rows.map((r) => {
+    const lastDate = fromMkDate(r.last_statement_date);
+    return compact({
+      account: str(r.ttr),
+      currency: str(r.currency) ?? "EUR",
+      balance: num(r.finished_state),
+      last_statement: str(r.last_statement_count_code),
+      last_statement_date: lastDate,
+      days_since_last_statement: lastDate ? daysBetween(lastDate, today) : undefined,
+    });
+  });
+  const totals = new Map<string, number>();
+  for (const a of accounts) if (a.balance !== undefined) totals.set(a.currency, round2((totals.get(a.currency) ?? 0) + a.balance));
+  return { accounts, total_by_currency: Object.fromEntries(totals) };
+}
+
+export interface CompensationBill {
+  number?: string;
+  date?: string;
+  due_date?: string;
+  currency: string;
+  total?: number;
+  compensated?: number;
+}
+
+/** Compensations (kompenzacije): which of our invoices and the partner's were set off against each other. */
+export function compensationSummary(records: MkRecord[], filter: { partner?: string } = {}) {
+  const bills = (list: unknown): CompensationBill[] =>
+    asArray<MkRecord>(list).map(
+      (b) =>
+        compact({
+          number: str(b.count_code),
+          date: fromMkDate(b.doc_date),
+          due_date: fromMkDate(b.duo_payment),
+          currency: str(b.currency_code) ?? "EUR",
+          total: num(b.sum_all),
+          compensated: num(b.compensation_amount),
+        }) as CompensationBill,
+    );
+  const wanted = filter.partner?.toLowerCase();
+  const compensations = records
+    .filter((r) => !wanted || str(r.partner_desc)?.toLowerCase().includes(wanted))
+    .map((r) =>
+      compact({
+        number: str(r.count_code),
+        id: str(r.doc_id),
+        date: fromMkDate(r.doc_date),
+        partner: str(r.partner_desc),
+        partner_id: str(r.partner_id),
+        amount: num(r.compensation_amount) ?? 0,
+        confirmed: bool(r.confirmed),
+        confirmation_date: fromMkDate(r.confirmation_date),
+        // Our invoices the partner's debt was set off against, and the partner's invoices to us.
+        our_invoices: bills(r.sales_bill_list),
+        their_invoices: bills(r.purchase_bill_list),
+      }),
+    )
+    .sort((a, b) => (a.date ?? "").localeCompare(b.date ?? ""));
+  return {
+    compensations,
+    total: round2(compensations.reduce((s, c) => s + (c.amount ?? 0), 0)),
+    unconfirmed: compensations.filter((c) => c.confirmed === false).length,
   };
 }

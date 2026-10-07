@@ -44,6 +44,8 @@ export interface CreateServerOptions {
    * must survive between requests. Without it the server is read-only.
    */
   write?: WriteContext;
+  /** Downloads accounting exports from the link Metakocka returns; injected for tests. */
+  fetchFile?: typeof fetch;
 }
 
 const INSTRUCTIONS = [
@@ -56,13 +58,15 @@ const INSTRUCTIONS = [
     "credit notes and dated payments (and how late they pay).",
   "Reports: get_unpaid_invoices (receivables/payables aging), sales_summary (revenue) and purchase_summary (spending); " +
     "both summaries take compare_to for period-over-period comparison and a partner to look at one customer or supplier. " +
-    "Bank: get_bank_statements (money in and out).",
+    "Money: get_bank_balances (how much is on each account), get_bank_statements (money in and out), " +
+    "get_cash_register (blagajna), get_compensations (kompenzacije). accounting_export runs the export for the accountant " +
+    "with the user's export profiles from Metakocka.",
   "Dates are YYYY-MM-DD in the Europe/Ljubljana time zone. Amounts are in each document's currency.",
   "Users may write in Slovenian: račun = invoice (izdani = issued/sales, prejeti = received/purchase), ponudba = offer, " +
     "naročilo = order, dobavnica = packing list, dobropis = credit note, zaloga = stock, skladišče = warehouse, " +
     "kupec = customer, dobavitelj = supplier, zapadlo / zapadli = overdue, neplačano = unpaid, davčna številka = tax number, " +
     "kartica partnerja = partner statement, kartica artikla = stock movements, varnostna zaloga = safety stock, " +
-    "izpisek = bank statement, reklamacija = complaint, številka pošiljke = tracking code. " +
+    "izpisek = bank statement, stanje = balance, blagajna = cash register, kompenzacija = compensation, reklamacija = complaint, številka pošiljke = tracking code. " +
     "Reply in the language the user writes in.",
   "Metakocka runs searches one at a time per company, so prefer one well-filtered call over many small ones.",
 ].join(" ");
@@ -128,6 +132,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     cache: options.cache ?? new TtlCache(cacheTtlMs()),
     pdfDir: options.pdfDir,
     pdfDelivery: options.pdfDelivery ?? "file",
+    fetchFile: options.fetchFile,
   };
   registerDocumentTools(server, ctx);
   registerCatalogTools(server, ctx);

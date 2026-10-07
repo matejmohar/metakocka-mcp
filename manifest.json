@@ -123,8 +123,24 @@
       "description": "Spending on supplier invoices, grouped and optionally compared."
     },
     {
+      "name": "get_bank_balances",
+      "description": "How much is on each bank account, from its last statement."
+    },
+    {
       "name": "get_bank_statements",
       "description": "Money in and out per bank account, with transactions."
+    },
+    {
+      "name": "get_cash_register",
+      "description": "Cash register journals: cash in and out, deposits, balances."
+    },
+    {
+      "name": "get_compensations",
+      "description": "Compensations: invoices settled against each other."
+    },
+    {
+      "name": "accounting_export",
+      "description": "The export for the accountant, with profiles from Metakocka, as a ZIP."
     },
     {
       "name": "draft_document",
