@@ -212,6 +212,10 @@ export function duplicateWarning(drafts: DraftStore, d: Pick<Draft, "docType" | 
   return same ? `${what} to this partner for the same amount was already created today (${same.result?.number ?? same.result?.mkId}).` : undefined;
 }
 
+/** A quantity or percentage in the summary's language: 37,48 in Slovenian, 37.48 in English. */
+const decimal = (n: number, language: "sl" | "en") =>
+  n.toLocaleString(language === "sl" ? "sl-SI" : "en-GB", { maximumFractionDigits: 6, useGrouping: false });
+
 export const money = (n: number, language: "sl" | "en") =>
   `${n.toLocaleString(language === "sl" ? "sl-SI" : "en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
 
@@ -222,7 +226,7 @@ export function linesAndTotals(d: Pick<Draft, "language" | "lines" | "totals">):
   const t = sl ? { lines: "Postavke", net: "Osnova", tax: "DDV", gross: "Skupaj z DDV" } : { lines: "Lines", net: "Net", tax: "VAT", gross: "Total incl. VAT" };
   return [
     `${t.lines}:`,
-    ...d.lines.map((l, i) => `  ${i + 1}. ${l.quantity} × ${l.name} à ${m(l.price)}${l.discountPercent ? ` −${l.discountPercent} %` : ""} = ${m(l.net)}`),
+    ...d.lines.map((l, i) => `  ${i + 1}. ${decimal(l.quantity, d.language)} × ${l.name} à ${m(l.price)}${l.discountPercent ? ` −${decimal(l.discountPercent, d.language)} %` : ""} = ${m(l.net)}`),
     "",
     `${t.net}: ${m(d.totals.net)}`,
     `${t.tax}: ${m(d.totals.tax)}`,

@@ -295,6 +295,15 @@ describe("draft_document", () => {
     expect(body.partner).toMatchObject({ addressId: "A2", address: "Druga 2" });
   });
 
+  it("writes quantities and discounts in the summary's language", async () => {
+    const { client } = await connect(metakocka());
+    const line = { product_id: "P1", quantity: 1.5, price: 10, discount_percent: 12.5 };
+    const { body: sl } = await draft(client, { ...OFFER, lines: [line] });
+    expect(sl.summary).toContain("  1. 1,5 × Svetovanje à 10,00 € −12,5 % = 13,13 €");
+    const { body: en } = await draft(client, { ...OFFER, lines: [{ ...line, quantity: 1500 }], language: "en" });
+    expect(en.summary).toContain("  1. 1500 × Svetovanje à 10.00 € −12.5 % = 13,125.00 €");
+  });
+
   it("uses an explicit price and discount, and rounds per line", async () => {
     const { client } = await connect(metakocka());
     const { body } = await draft(client, { ...OFFER, lines: [{ product_id: "P1", quantity: 3, price: 33.33, discount_percent: 10 }] });
@@ -794,8 +803,8 @@ describe("purchase invoices", () => {
         "Glavna 1, 1000 Ljubljana, Slovenia",
         "",
         "Postavke:",
-        "  1. 1 × Domene (smaragdna.com) à 17,21 € −4.77 % = 16,39 €",
-        "  2. 1 × Domene (martej.si) à 16,38 € −4.98 % = 15,56 €",
+        "  1. 1 × Domene (smaragdna.com) à 17,21 € −4,77 % = 16,39 €",
+        "  2. 1 × Domene (martej.si) à 16,38 € −4,98 % = 15,56 €",
         "",
         "Osnova: 31,95 €",
         "DDV: 7,03 €",
