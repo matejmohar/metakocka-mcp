@@ -7,7 +7,7 @@ import * as z from "zod/v4";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { deliveryPriceLists, findDocumentIdByNumber, getDocument, getMessages, getProofOfDelivery, searchBlacklist, type MkRecord } from "../api.js";
+import { deliveryPriceLists, findDocumentIdByNumber, getDocument, getEmailEvents, getMessages, getProofOfDelivery, searchBlacklist, type MkRecord } from "../api.js";
 import { MetakockaError } from "../client.js";
 import { envValue, pdfDirectory } from "../config.js";
 import { addDays, fromMkDate, mkDayStart, todayInLjubljana } from "../dates.js";
@@ -218,6 +218,42 @@ export function registerOrderTools(server: McpServer, ctx: ToolContext): void {
           blacklisted: hits.length > 0,
           matches: hits.map((p) => compact({ name: str(p.customer), email: str(p.email), phone: str(p.gsm) ?? str(p.phone) })),
         };
+      }),
+  );
+
+  server.registerTool(
+    "get_email_events",
+    {
+      title: "E-mail delivery",
+      description:
+        "What happened to e-mails sent through Metakocka (e.g. with draft_message): sent, delivered, opened, clicked, " +
+        "bounced (with the reason) or reported as spam. Give the message ids from the send result. Events arrive over time; " +
+        "right after sending there may be none yet.",
+      inputSchema: z.object({ message_ids: z.array(z.string().min(1)).min(1).max(1000).describe("Message ids (mk_id) from the send result.") }),
+      annotations: READ_ONLY,
+    },
+    async (args) =>
+      run(async () => {
+        const rows = await getEmailEvents(ctx.getClient(), [...new Set(args.message_ids)]);
+        const messages = rows.map((r) => {
+          const events = asArray<MkRecord>(r.events)
+            .map((e) => compact({ time: str(e.event_time), event: str(e.event_type), reason: str(e.event_sub_type) }))
+            .sort((a, b) => String(a.time ?? "").localeCompare(String(b.time ?? "")));
+          const kinds = new Set(events.map((e) => e.event));
+          const status = kinds.has("hard_bounce") || kinds.has("complaint")
+            ? "failed"
+            : kinds.has("open") || kinds.has("click")
+              ? "opened"
+              : kinds.has("delivered")
+                ? "delivered"
+                : kinds.has("soft_bounce") || kinds.has("delivery_delay")
+                  ? "delayed"
+                  : kinds.has("send")
+                    ? "sent"
+                    : "no events yet";
+          return { message_id: str(r.mk_id), status, events };
+        });
+        return { messages };
       }),
   );
 }

@@ -1,8 +1,12 @@
 /**
- * Opt-in tools that create documents in Metakocka (METAKOCKA_WRITE): offers, sales orders, invoices and received
- * invoices; register entries: partners and products (draft_partner / draft_product); and changes to existing
- * documents: payments (draft_payment) and a sales order's status (draft_order_status).
- * draft_document builds and checks a document without saving it;
+ * Opt-in tools that write to Metakocka (METAKOCKA_WRITE), each turned on by its own permission:
+ * - new documents: offers, sales orders, invoices, prepayment invoices and received invoices (draft_document),
+ *   credit notes (draft_credit_note), purchase orders and warehouse documents (draft_stock_document);
+ * - register entries: new partners and products (draft_partner / draft_product) and changes to them
+ *   (draft_partner_update / draft_product_update);
+ * - changes to existing documents: payments (draft_payment), fields Metakocka lets change (draft_update);
+ * - shipping (draft_shipping), complaints (draft_complaint) and messages to customers (draft_message).
+ * Each draft_* tool builds and checks the change without saving it;
  * commit_document saves exactly that draft, after the user confirms it in
  * their client (see WriteSettings.confirm); discard_draft drops it.
  */
@@ -17,10 +21,37 @@ import { DraftError, sameSummary } from "../write/document.js";
 import { buildInvoiceDraft, type InvoiceInfo, type InvoiceInput } from "../write/invoice.js";
 import { buildOfferDraft, buildOrderDraft, type OfferInput, type OrderInput } from "../write/offer.js";
 import { buildPaymentDraft, PAYABLE_TYPES, type PaymentInput } from "../write/payment.js";
-import { buildStatusDraft } from "../write/status.js";
+import { buildComplaintDraft, CLAIM_TYPES, type ComplaintInput } from "../write/complaint.js";
+import { buildCreditNoteDraft, type CreditNoteInput } from "../write/creditnote.js";
+import { buildMessageDraft, CHANNELS, type MessageInput } from "../write/message.js";
+import { buildPartnerUpdateDraft, buildProductUpdateDraft } from "../write/recordupdate.js";
+import { buildShippingDraft, type ShippingInput } from "../write/shipping.js";
+import { buildStockDocDraft, type StockDocInput, type StockDocType } from "../write/stockdocs.js";
+import { buildUpdateDraft, INVOICE_UPDATE_TYPES, ORDER_UPDATE_TYPES, WAREHOUSE_UPDATE_TYPES, type UpdateInput } from "../write/update.js";
+import { envValue } from "../config.js";
 import { buildPurchaseDraft, type PurchaseInfo, type PurchaseInput } from "../write/purchase.js";
 import { buildPartnerDraft, buildProductDraft } from "../write/records.js";
-import { INVOICE_TYPES, isNewDocumentType, PURCHASE_TYPES, type WriteSettings } from "../write/settings.js";
+import { INVOICE_TYPES, PURCHASE_TYPES, type WritableDocType, type WriteSettings } from "../write/settings.js";
+
+/** What draft_document makes; the other new documents have their own tools. */
+const SALES_DOCUMENT_TYPES: readonly WritableDocType[] = [
+  "sales_offer",
+  "sales_order",
+  "sales_bill_domestic",
+  "sales_bill_foreign",
+  "sales_bill_prepaid",
+  "purchase_bill_domestic",
+  "purchase_bill_foreign",
+];
+const STOCK_DOCUMENT_TYPES: readonly StockDocType[] = [
+  "purchase_order",
+  "warehouse_packing_list",
+  "warehouse_delivery_note",
+  "warehouse_receiving_note",
+  "warehouse_acceptance_note",
+  "transfer_order",
+  "workorder",
+];
 import { compact } from "../util.js";
 import { run, type ToolContext } from "./shared.js";
 
@@ -63,7 +94,9 @@ const COMMIT_CONFIRMATION: Record<WriteSettings["confirm"], string> = {
 export function registerWriteTools(server: McpServer, ctx: ToolContext, write: WriteContext): void {
   const { settings, drafts, journal } = write;
 
-  const documentTypes = settings.docTypes.filter(isNewDocumentType);
+  const has = (t: WritableDocType) => settings.docTypes.includes(t);
+  const documentTypes = settings.docTypes.filter((t) => SALES_DOCUMENT_TYPES.includes(t));
+  const prepaid = has("sales_bill_prepaid");
   const partners = settings.docTypes.includes("partner");
   const products = settings.docTypes.includes("product");
   const payments = settings.docTypes.includes("payment");
@@ -81,6 +114,7 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
     offers && "sales_offer = ponudba (also used as predračun)",
     orders && "sales_order = prodajno naročilo",
     invoices && "sales_bill_domestic = račun for a domestic partner, sales_bill_foreign = tuji račun for a foreign partner",
+    prepaid && "sales_bill_prepaid = avansni račun (prepayment invoice, domestic partners)",
     purchases && "purchase_bill_domestic / purchase_bill_foreign = prejeti račun from a domestic / foreign supplier",
   ].filter(Boolean).join("; ");
   const forDates = [invoices && "Invoices", purchases && "purchase invoices"].filter(Boolean).join(" and ");
@@ -264,6 +298,18 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
   };
   const recordAnswer = ({ draft, warnings }: { draft: Draft; warnings: string[] }) =>
     compact({ draft_id: draft.id, expires_at: new Date(draft.expiresAt).toISOString(), summary: draft.summary, warnings, next: NEXT_STEP[settings.confirm] });
+  /** A drafted document's answer: also its lines and totals. */
+  const withLines = ({ draft, warnings }: { draft: Draft; warnings: string[] }) =>
+    compact({
+      draft_id: draft.id,
+      expires_at: new Date(draft.expiresAt).toISOString(),
+      summary: draft.summary,
+      partner: draft.partner,
+      lines: draft.lines.map((l) => ({ product_id: l.productId, code: l.code, name: l.name, quantity: l.quantity, unit: l.unit, price: l.price, vat_percent: l.taxRatePercent, total: l.gross })),
+      totals: draft.totals,
+      warnings,
+      next: NEXT_STEP[settings.confirm],
+    });
 
   if (partners) {
     server.registerTool(
@@ -352,24 +398,298 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
     );
   }
 
-  if (orders) {
+  if (partners) {
     server.registerTool(
-      "draft_order_status",
+      "draft_partner_update",
       {
-        title: "Draft a sales order status change",
+        title: "Draft a change to a partner",
         description:
-          "Prepare a new status for a sales order (e.g. \"Odpremljen\" / shipped) WITHOUT saving it. Statuses are the " +
-          "company's own, from Metakocka's register: use one exactly as the user or other orders (search_documents) name it. " +
-          "Returns a draft_id and a summary: show it, then commit_document.",
+          "Prepare a change to an existing partner's data WITHOUT saving it: name, address, tax or registration number, VAT " +
+          "status, role. Only the fields given change; the summary shows old and new values. Returns a draft_id and a summary: " +
+          "show it, then commit_document.",
         inputSchema: z.object({
-          number: z.string().min(1).optional().describe("The sales order's number as shown in Metakocka."),
-          id: z.string().min(1).optional().describe("Or its Metakocka id."),
-          status: z.string().min(1).max(100).describe("The new status, exactly as in Metakocka."),
+          partner_id: z.string().min(1).describe("The partner's Metakocka id (from search_partners)."),
+          name: z.string().max(100).optional(),
+          street: z.string().max(150).optional(),
+          post_number: z.string().max(20).optional(),
+          city: z.string().max(100).optional(),
+          country: z.string().max(50).optional(),
+          tax_id: z.string().max(50).optional(),
+          registration_number: z.string().max(50).optional(),
+          taxpayer: z.boolean().optional().describe("VAT registered (davčni zavezanec)."),
+          role: z.enum(["supplier", "buyer", "both"]).optional(),
           language: z.enum(["sl", "en"]).default("sl").describe("Language of the summary the user confirms."),
         }),
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       },
-      async (args) => run(async () => recordAnswer(await buildStatusDraft(recordContext(), args))),
+      async (args) => run(async () => recordAnswer(await buildPartnerUpdateDraft(recordContext(), args))),
+    );
+  }
+
+  if (products) {
+    server.registerTool(
+      "draft_product_update",
+      {
+        title: "Draft a change to a product",
+        description:
+          "Prepare a change to an existing product WITHOUT saving it: name, description, unit, barcode, active, sales / " +
+          "purchasing, safety stock (varnostna zaloga), minimum order quantity, weight, or its sales price (only when it has " +
+          "one untiered sales price in EUR). Only the fields given change. Returns a draft_id and a summary: show it, then commit_document.",
+        inputSchema: z.object({
+          product_id: z.string().min(1).describe("The product's Metakocka id (from search_products)."),
+          name: z.string().max(200).optional(),
+          description: z.string().max(700).optional().describe('Longer description; "" removes it.'),
+          unit: z.string().max(20).optional(),
+          barcode: z.string().max(50).optional().describe('"" removes it.'),
+          active: z.boolean().optional(),
+          sales: z.boolean().optional(),
+          purchasing: z.boolean().optional(),
+          safety_stock: z.number().min(0).optional(),
+          minimal_order_quantity: z.number().min(0).optional(),
+          weight_kg: z.number().min(0).optional(),
+          price: z.number().min(0).optional().describe("New net sales price in EUR."),
+          language: z.enum(["sl", "en"]).default("sl").describe("Language of the summary the user confirms."),
+        }),
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async (args) => run(async () => recordAnswer(await buildProductUpdateDraft(recordContext(), args))),
+    );
+  }
+
+  if (has("sales_bill_credit_note")) {
+    server.registerTool(
+      "draft_credit_note",
+      {
+        title: "Draft a credit note",
+        description:
+          "Prepare a credit note (dobropis) WITHOUT saving it: goods = returned goods, credited at the invoice's prices (all " +
+          "its lines, or the ones given with smaller quantities); financial = a discount or correction afterwards, on service " +
+          "products; standalone = not linked to an invoice. Saved not issued; it can't credit more than its invoice. Returns a " +
+          "draft_id and a summary: show it, then commit_document.",
+        inputSchema: z.object({
+          credit_type: z.enum(["goods", "financial", "standalone"]),
+          from_invoice: z.string().min(1).optional().describe("goods / financial: number of the sales invoice it credits."),
+          partner_id: z.string().min(1).optional().describe("standalone: the partner's id."),
+          address_id: z.string().optional(),
+          lines: z
+            .array(
+              z.object({
+                product_id: z.string().optional(),
+                code: z.string().optional(),
+                quantity: z.number().positive().optional(),
+                price: z.number().min(0).optional().describe("financial / standalone: net unit price; default the price list."),
+                discount_percent: z.number().min(0).max(100).optional(),
+              }),
+            )
+            .max(50)
+            .optional()
+            .describe("goods: which invoice lines and how many (default all); financial / standalone: the lines."),
+          due_days: z.number().int().min(0).max(365).optional(),
+          due_date: z.string().optional(),
+          note: z.string().max(1000).optional(),
+          language: z.enum(["sl", "en"]).default("sl").describe("Language of the summary the user confirms."),
+        }),
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async (args) => run(async () => withLines(await buildCreditNoteDraft(recordContext(), args as CreditNoteInput))),
+    );
+  }
+
+  const stockTypes = STOCK_DOCUMENT_TYPES.filter((t) => has(t));
+  if (stockTypes.length) {
+    server.registerTool(
+      "draft_stock_document",
+      {
+        title: "Draft a purchase or warehouse document",
+        description:
+          "Prepare WITHOUT saving it: " +
+          [
+            has("purchase_order") && "a purchase order to a supplier (naročilnica: purchasing products with price and vat_percent)",
+            has("warehouse_packing_list") &&
+              "a packing list (dobavnica, takes goods out of stock) or delivery order (nalog za odpremo) to a customer, from lines or from_order; " +
+                "a goods received note (prevzemnica, puts goods into stock) or receiving order (nalog za prevzem) from a supplier, from lines " +
+                "(with price and vat_percent) or from_purchase_order; a transfer between warehouses (transfer_order, confirm moves the stock); " +
+                "a work order (delovni nalog: its head, e.g. from_order)",
+          ]
+            .filter(Boolean)
+            .join("; ") +
+          ". Partners and products by id, as for draft_document. Returns a draft_id and a summary: show it, then commit_document.",
+        inputSchema: z.object({
+          doc_type: z.enum(stockTypes as [StockDocType, ...StockDocType[]]),
+          partner_id: z.string().min(1).optional(),
+          address_id: z.string().optional(),
+          lines: z
+            .array(
+              z.object({
+                product_id: z.string().optional(),
+                code: z.string().optional(),
+                quantity: z.number().positive().max(1_000_000).optional(),
+                price: z.number().min(0).optional().describe("Net unit price; required for purchase-side documents."),
+                discount_percent: z.number().min(0).max(100).optional(),
+                vat_percent: z.number().min(0).max(100).optional().describe("Purchase-side documents: the VAT rate."),
+              }),
+            )
+            .max(100)
+            .optional(),
+          warehouse: z.string().optional().describe("Warehouse name, mark or id; for a transfer the source."),
+          to_warehouse: z.string().optional().describe("Transfers: the target warehouse."),
+          confirm: z.boolean().optional().describe("Transfers: confirm at once (moves the stock)."),
+          from_order: z.string().optional().describe("Packing lists, delivery orders, work orders: the sales order's number."),
+          from_purchase_order: z.string().optional().describe("Goods received notes, receiving orders: the purchase order's number."),
+          supplier_document: z.string().max(50).optional().describe("Goods received notes: the supplier's delivery note number."),
+          delivery_date: z.string().optional().describe("Purchase orders: expected delivery; work orders: deadline (YYYY-MM-DD)."),
+          start_date: z.string().optional().describe("Work orders: start (YYYY-MM-DD), default today."),
+          title: z.string().max(100).optional(),
+          note: z.string().max(1000).optional(),
+          language: z.enum(["sl", "en"]).default("sl").describe("Language of the summary the user confirms."),
+        }),
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async (args) =>
+        run(async () => {
+          try {
+            return withLines(await buildStockDocDraft({ ...recordContext(), tool: ctx }, args as StockDocInput));
+          } catch (error) {
+            throw missingHint(error);
+          }
+        }),
+    );
+  }
+
+  const updatable = [
+    ...(has("order_update") ? ORDER_UPDATE_TYPES : []),
+    ...(has("invoice_update") ? INVOICE_UPDATE_TYPES : []),
+    ...(has("warehouse_update") ? WAREHOUSE_UPDATE_TYPES : []),
+  ];
+  if (updatable.length) {
+    server.registerTool(
+      "draft_update",
+      {
+        title: "Draft a change to a document",
+        description:
+          "Prepare a change to an existing document WITHOUT saving it, limited to what Metakocka's API can change: " +
+          [
+            has("order_update") &&
+              "sales orders: status, tracking_code (only once the order has an invoice), delivery_type, shipped_date, note, or create_invoice " +
+                "(Metakocka makes the invoice by its own order settings, possibly with a packing list; to control the invoice use draft_document with from_order)",
+            has("invoice_update") && "invoices: status",
+            has("warehouse_update") && "warehouse documents: title, status, note, buyer_order, delivery_type; transfers: confirm_transfer",
+          ]
+            .filter(Boolean)
+            .join("; ") +
+          ". Statuses are the company's own; the draft names the ones in use. Returns a draft_id and a summary with old and new values: show it, then commit_document.",
+        inputSchema: z.object({
+          doc_type: z.enum(updatable as [string, ...string[]]),
+          number: z.string().min(1).optional().describe("Document number as shown in Metakocka."),
+          id: z.string().min(1).optional().describe("Or its Metakocka id."),
+          status: z.string().max(100).optional().describe('New status as in Metakocka; on an invoice "" clears it.'),
+          ...(has("order_update")
+            ? {
+                tracking_code: z.string().max(100).optional(),
+                shipped_date: z.string().optional().describe("YYYY-MM-DD"),
+                create_invoice: z.boolean().optional().describe("Sales orders: have Metakocka make the invoice."),
+              }
+            : {}),
+          ...(has("order_update") || has("warehouse_update") ? { delivery_type: z.string().max(100).optional(), note: z.string().max(1000).optional() } : {}),
+          ...(has("warehouse_update")
+            ? { title: z.string().max(100).optional(), buyer_order: z.string().max(30).optional(), confirm_transfer: z.boolean().optional() }
+            : {}),
+          language: z.enum(["sl", "en"]).default("sl").describe("Language of the summary the user confirms."),
+        }),
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async (args) => run(async () => recordAnswer(await buildUpdateDraft(recordContext(), args as UpdateInput))),
+    );
+  }
+
+  if (has("shipping")) {
+    server.registerTool(
+      "draft_shipping",
+      {
+        title: "Draft shipping",
+        description:
+          "Prepare WITHOUT doing it: labels = delivery service labels for sales orders (registers the parcels with the " +
+          "delivery service; the answer has the tracking codes and label PDFs); mark_shipped = mark orders shipped; group = " +
+          "put orders into a group expedition (one parent order and delivery). Returns a draft_id and a summary: show it, then commit_document.",
+        inputSchema: z.object({
+          action: z.enum(["labels", "mark_shipped", "group"]),
+          orders: z.array(z.string().min(1)).max(100).optional().describe("Sales order numbers."),
+          group_number: z.string().max(30).optional().describe("group: the group's customer order number (existing or new)."),
+          partner_id: z.string().optional().describe("group, new group: partner of the parent order."),
+          delivery_type: z.string().max(100).optional().describe("group, new group: delivery type as in Metakocka."),
+          language: z.enum(["sl", "en"]).default("sl").describe("Language of the summary the user confirms."),
+        }),
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async (args) => run(async () => recordAnswer(await buildShippingDraft(recordContext(), args as ShippingInput))),
+    );
+  }
+
+  if (has("complaint")) {
+    server.registerTool(
+      "draft_complaint",
+      {
+        title: "Draft a complaint",
+        description:
+          "Prepare WITHOUT saving it: create = a new complaint (reklamacija), return (vračilo) or replacement (zamenjava) for a " +
+          "sales order, with the products from the order and how many (replacements also with the replacement products and " +
+          "their gross prices); update = a complaint's new status, note or return tracking code. Returns a draft_id and a " +
+          "summary: show it, then commit_document.",
+        inputSchema: z.object({
+          action: z.enum(["create", "update"]),
+          claim_type: z.enum(CLAIM_TYPES).optional(),
+          order_number: z.string().optional().describe("create: the sales order's number."),
+          products: z
+            .array(z.object({ product_id: z.string().optional(), code: z.string().optional(), quantity: z.number().positive(), reason: z.string().max(100).optional(), description: z.string().max(500).optional() }))
+            .max(50)
+            .optional(),
+          replacement_products: z
+            .array(z.object({ product_id: z.string().optional(), code: z.string().optional(), quantity: z.number().positive(), price_with_tax: z.number().min(0) }))
+            .max(50)
+            .optional(),
+          reason: z.string().max(100).optional().describe("Complaint reason as in Metakocka's register."),
+          description: z.string().max(1000).optional(),
+          iban: z.string().max(40).optional().describe("Customer's account for a refund."),
+          return_tracking_code: z.string().max(100).optional(),
+          complaint_number: z.string().optional().describe("update: the complaint's number."),
+          status: z.string().max(100).optional().describe("Status as in Metakocka (draft, progress, completed or the company's own); required for update."),
+          note: z.string().max(1000).optional().describe("update: a note."),
+          language: z.enum(["sl", "en"]).default("sl").describe("Language of the summary the user confirms."),
+        }),
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async (args) =>
+        run(async () => recordAnswer(await buildComplaintDraft({ ...recordContext(), userEmail: envValue(process.env, "METAKOCKA_USER_EMAIL") }, args as ComplaintInput))),
+    );
+  }
+
+  if (has("message")) {
+    server.registerTool(
+      "draft_message",
+      {
+        title: "Draft a message to a customer",
+        description:
+          "Prepare an SMS, Viber, WhatsApp or e-mail to a customer, sent through Metakocka's connections, WITHOUT sending it. " +
+          "Once committed it is sent right away and can't be recalled: write exactly what the user asked for, and show them " +
+          "the summary. Returns a draft_id and a summary: show it, then commit_document.",
+        inputSchema: z.object({
+          channel: z.enum(CHANNELS),
+          to_number: z.string().max(30).optional().describe("sms / viber / whatsapp: the phone number."),
+          country: z.string().max(50).optional().describe("Country of the number, e.g. SI."),
+          text: z.string().max(1000).optional().describe("sms / viber / whatsapp: the message."),
+          sender_name: z.string().max(11).optional().describe("SMS: the sender name (registered in Metakocka)."),
+          to_emails: z.array(z.string()).max(20).optional(),
+          cc_emails: z.array(z.string()).max(20).optional(),
+          from_email: z.string().optional().describe("E-mail: an address on a domain verified for sending in Metakocka."),
+          from_name: z.string().max(100).optional(),
+          subject: z.string().max(200).optional(),
+          body: z.string().max(20_000).optional().describe("E-mail: plain text; blank lines separate paragraphs."),
+          marketing: z.boolean().default(false).describe("A marketing message (default: transactional)."),
+          language: z.enum(["sl", "en"]).default("sl").describe("Language of the summary the user confirms."),
+        }),
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async (args) => run(async () => recordAnswer(buildMessageDraft(recordContext(), args as MessageInput))),
     );
   }
 

@@ -10,10 +10,10 @@ import { fromMkDate } from "../dates.js";
 import { asArray, num, str } from "../util.js";
 import type { Draft, DraftStore } from "./drafts.js";
 import type { Journal } from "./journal.js";
+import { commitChange, resolveUnknownChange } from "./change.js";
 import { commitPayment, resolveUnknownPayment } from "./payment.js";
 import { commitRecord, resolveUnknownRecord } from "./records.js";
 import { isRecordType, type NewDocumentType } from "./settings.js";
-import { commitStatus, resolveUnknownStatus } from "./status.js";
 
 type DocumentType = NewDocumentType;
 
@@ -27,21 +27,33 @@ export interface CommitContext {
 }
 
 export type CommitOutcome =
-  | { status: "created"; number?: string; mk_id: string; total?: number; currency?: string; address_id?: string; paid_now?: number; order_status?: string; warnings: string[] }
+  | {
+      status: "created";
+      number?: string;
+      mk_id: string;
+      total?: number;
+      currency?: string;
+      address_id?: string;
+      paid_now?: number;
+      details?: Record<string, unknown>;
+      warnings: string[];
+    }
   | { status: "rejected"; message: string }
   | { status: "unknown"; message: string };
 
 export async function commitDraft(ctx: CommitContext, draft: Draft): Promise<CommitOutcome> {
   if (isRecordType(draft.docType)) return commitRecord(ctx, draft);
   if (draft.docType === "payment") return commitPayment(ctx, draft);
-  if (draft.docType === "order_status") return commitStatus(ctx, draft);
+  if (draft.change) return commitChange(ctx, draft);
   const base = { draft_id: draft.id, doc_type: draft.docType, installation: ctx.installation };
   draft.status = "committing";
   await ctx.journal({ ...base, event: "attempt", payload: draft.payload });
 
   let response: MkRecord;
   try {
-    response = await putDocument(ctx.client, draft.payload, ctx.timeoutMs);
+    response = draft.putEndpoint
+      ? await ctx.client.call(draft.putEndpoint, draft.payload, { idempotent: false, timeoutMs: ctx.timeoutMs })
+      : await putDocument(ctx.client, draft.payload, ctx.timeoutMs);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (error instanceof MetakockaError && error.oprCode !== undefined) {
@@ -69,12 +81,13 @@ export async function resolveUnknown(ctx: CommitContext, draft: Draft): Promise<
   const docType = draft.docType;
   if (isRecordType(docType)) return resolveUnknownRecord(ctx, draft);
   if (docType === "payment") return resolveUnknownPayment(ctx, draft);
-  if (docType === "order_status") return resolveUnknownStatus(ctx, draft);
+  if (draft.change) return resolveUnknownChange(ctx, draft);
   const { documents } = await searchDocuments(ctx.client, {
-    docType,
+    docType: docType as DocumentType,
     dateFrom: draft.docDate,
     dateTo: draft.docDate,
-    filters: [{ type: "partner_mk_id", value: draft.partner.id }],
+    // Transfers between warehouses have no partner.
+    filters: draft.partner.id ? [{ type: "partner_mk_id", value: draft.partner.id }] : [],
     limit: 100,
   });
   const known = new Set(ctx.drafts.committed().map((d) => d.result?.mkId));
@@ -138,6 +151,8 @@ export function verifyStored(draft: Draft, doc: MkRecord): string[] {
   if (str(partner.mk_id) && str(partner.mk_id) !== draft.partner.id) problems.push(`partner is ${str(partner.customer) ?? str(partner.mk_id)}, not ${draft.partner.name}`);
   if (str(partner.mk_address_id) && str(partner.mk_address_id) !== draft.partner.addressId) problems.push("partner address differs");
 
+  // Transfers and work orders carry no prices.
+  const unpriced = draft.docType === "transfer_order" || draft.docType === "workorder";
   const stored = asArray<MkRecord>(doc.product_list);
   if (stored.length !== draft.lines.length) problems.push(`${stored.length} lines stored, ${draft.lines.length} confirmed`);
   draft.lines.forEach((line, i) => {
@@ -146,11 +161,11 @@ export function verifyStored(draft: Draft, doc: MkRecord): string[] {
     const n = i + 1;
     if (str(s.mk_id) && str(s.mk_id) !== line.productId) problems.push(`line ${n} has product ${str(s.code) ?? str(s.mk_id)}, not ${line.code ?? line.productId}`);
     if (!near(num(s.amount), line.quantity, 1e-6)) problems.push(`line ${n} quantity ${str(s.amount)}, not ${line.quantity}`);
-    if (!near(num(s.price), line.price, 1e-4)) problems.push(`line ${n} price ${str(s.price)}, not ${line.price}`);
-    if (str(s.tax) && str(s.tax) !== line.taxCode) problems.push(`line ${n} tax ${str(s.tax)}, not ${line.taxCode}`);
+    if (!unpriced && !near(num(s.price), line.price, 1e-4)) problems.push(`line ${n} price ${str(s.price)}, not ${line.price}`);
+    if (!unpriced && str(s.tax) && str(s.tax) !== line.taxCode) problems.push(`line ${n} tax ${str(s.tax)}, not ${line.taxCode}`);
   });
   const total = num(doc.sum_all);
-  if (total !== undefined && !near(total, draft.totals.gross, 0.01)) problems.push(`total ${total}, not ${draft.totals.gross}`);
+  if (!unpriced && total !== undefined && !near(total, draft.totals.gross, 0.01)) problems.push(`total ${total}, not ${draft.totals.gross}`);
   const due = fromMkDate(draft.payload.duo_payment);
   if (due && fromMkDate(doc.duo_payment) && fromMkDate(doc.duo_payment) !== due) problems.push(`due date ${fromMkDate(doc.duo_payment)}, not ${due}`);
   // Invoices are meant to stay not issued until the user issues them in Metakocka.

@@ -76,6 +76,7 @@ describe("MCP server", () => {
       "get_delivery_prices",
       "get_document",
       "get_document_pdf",
+      "get_email_events",
       "get_external_stock",
       "get_messages",
       "get_partner",

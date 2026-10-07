@@ -241,7 +241,7 @@ export async function buildPurchaseDraft(
   return { draft, warnings, info };
 }
 
-function purchaseProduct(catalog: Map<string, CatalogProduct>, line: PurchaseLineInput, n: number): CatalogProduct {
+export function purchaseProduct(catalog: Map<string, CatalogProduct>, line: PurchaseLineInput, n: number): CatalogProduct {
   let product: CatalogProduct | undefined;
   if (line.product_id) product = catalog.get(line.product_id);
   else if (line.code) {
@@ -266,7 +266,7 @@ function purchaseProduct(catalog: Map<string, CatalogProduct>, line: PurchaseLin
  * The tax code for a VAT rate: the one this supplier's last invoice used for this product when the
  * catalogue gives it that rate, else the only code with that rate in the catalogue.
  */
-function taxCodeFor(catalog: Map<string, CatalogProduct>, history: MkRecord[], product: CatalogProduct, rate: number, n: number): string {
+export function taxCodeFor(catalog: Map<string, CatalogProduct>, history: MkRecord[], product: CatalogProduct, rate: number, n: number): string {
   const codes = new Set<string>();
   for (const p of catalog.values()) if (p.taxCode && p.taxRatePercent === rate) codes.add(p.taxCode);
   for (const d of history) {

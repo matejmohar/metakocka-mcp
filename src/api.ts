@@ -575,3 +575,10 @@ export async function printReportAsync(
   }
   throw new MetakockaError(`The print-out is not ready after ${Math.round(q.maxWaitMs / 1000)} s; Metakocka is still working on it.`);
 }
+
+/** Delivery events (sent, delivered, opened, bounced …) of e-mails sent through send_message. Lives at /rest/eshop/get_email_events. */
+export async function getEmailEvents(client: MetakockaClient, ids: string[]): Promise<MkRecord[]> {
+  const response = await client.call("../get_email_events", { mk_id_list: ids });
+  // Metakocka answers with a bare list, which the client hands over as { list }.
+  return asArray<MkRecord>(response.list);
+}

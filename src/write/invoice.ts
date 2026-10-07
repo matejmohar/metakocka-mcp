@@ -29,7 +29,7 @@ import {
 } from "./document.js";
 import type { Draft, DraftLine } from "./drafts.js";
 
-export type InvoiceType = "sales_bill_domestic" | "sales_bill_foreign";
+export type InvoiceType = "sales_bill_domestic" | "sales_bill_foreign" | "sales_bill_prepaid";
 
 export interface InvoiceInput {
   doc_type: InvoiceType;
@@ -90,7 +90,10 @@ export async function buildInvoiceDraft(
   if (!partnerId) throw new DraftError("Give partner_id (from search_partners).");
 
   const partner = await resolvePartner(ctx.client, partnerId, { foreign: "allow", what: "Invoices" });
-  if (partner.foreign !== foreignInvoice) {
+  if (input.doc_type === "sales_bill_prepaid" && partner.foreign) {
+    throw new DraftError(`${partner.name} is a foreign partner; prepayment invoices for foreign partners are not supported yet. Create it in Metakocka.`);
+  }
+  if (input.doc_type !== "sales_bill_prepaid" && partner.foreign !== foreignInvoice) {
     throw new DraftError(
       partner.foreign
         ? `${partner.name} is a foreign partner: use doc_type sales_bill_foreign.`
@@ -291,7 +294,7 @@ function summarize(
   const t =
     d.language === "sl"
       ? {
-          head: foreign ? "Ustvari TUJI RAČUN (neizdan) za" : "Ustvari RAČUN (neizdan) za",
+          head: foreign ? "Ustvari TUJI RAČUN (neizdan) za" : d.docType === "sales_bill_prepaid" ? "Ustvari AVANSNI RAČUN (neizdan) za" : "Ustvari RAČUN (neizdan) za",
           offer: "Iz ponudbe",
           order: "Iz prodajnega naročila",
           title: "Naziv",
@@ -301,7 +304,11 @@ function summarize(
           due: "rok plačila",
         }
       : {
-          head: foreign ? "Create a FOREIGN INVOICE (not issued) for" : "Create an INVOICE (not issued) for",
+          head: foreign
+            ? "Create a FOREIGN INVOICE (not issued) for"
+            : d.docType === "sales_bill_prepaid"
+              ? "Create a PREPAYMENT INVOICE (not issued) for"
+              : "Create an INVOICE (not issued) for",
           offer: "From offer",
           order: "From sales order",
           title: "Title",

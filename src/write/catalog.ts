@@ -19,6 +19,8 @@ export interface CatalogProduct {
   active: boolean;
   sales: boolean;
   purchasing: boolean;
+  /** A service, not goods kept in stock. */
+  service: boolean;
   /** Net sales price from the one applicable price list entry, when there is exactly one. */
   price?: number;
   /** Discount on that price list entry, in percent. */
@@ -74,6 +76,7 @@ export function toCatalogProduct(p: MkRecord, today: string): CatalogProduct {
     active: bool(p.activated ?? p.active) !== false,
     sales: bool(p.sales) === true,
     purchasing: bool(p.purchasing) === true,
+    service: bool(p.service) === true,
     price: one ? num(one.price) : undefined,
     discountPercent: one ? num(one.discount) : undefined,
     taxCode: taxCodes.length === 1 ? taxCodes[0] : undefined,

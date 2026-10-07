@@ -99,29 +99,48 @@ function urlFromEnvIfValid(): string | undefined {
 
 /** Replaces the "Read-only" opening of the instructions when the write tools are on. */
 export function writeInstructions(confirm: "client" | "elicitation" | "never", docTypes: readonly string[] = ["sales_offer"]): string {
+  const has = (t: string) => docTypes.includes(t);
   const what = [
-    docTypes.includes("sales_offer") && "offers (ponudba / predračun)",
-    docTypes.includes("sales_order") && "sales orders (prodajno naročilo)",
-    docTypes.some((t) => t.startsWith("sales_bill_")) && `invoices (račun, saved not issued; also from an offer${docTypes.includes("sales_order") ? " or order" : ""})`,
+    has("sales_offer") && "offers (ponudba / predračun)",
+    has("sales_order") && "sales orders (prodajno naročilo)",
+    docTypes.some((t) => t === "sales_bill_domestic" || t === "sales_bill_foreign") &&
+      `invoices (račun, saved not issued; also from an offer${has("sales_order") ? " or order" : ""}${has("sales_bill_prepaid") ? "; also prepayment invoices" : ""})`,
+    has("sales_bill_credit_note") && "credit notes (dobropis)",
     docTypes.some((t) => t.startsWith("purchase_bill_")) && "received invoices (prejeti račun, copied from the supplier's invoice)",
-    docTypes.includes("partner") && "partners",
-    docTypes.includes("product") && "products",
+    has("purchase_order") && "purchase orders (naročilnica)",
+    has("warehouse_packing_list") && "warehouse documents (dobavnica, prevzemnica, transfers, work orders)",
+    has("partner") && "partners",
+    has("product") && "products",
   ].filter(Boolean);
-  const records = [docTypes.includes("partner") && "partners", docTypes.includes("product") && "products"].filter(Boolean);
-  const recordTools = [docTypes.includes("partner") && "draft_partner", docTypes.includes("product") && "draft_product"].filter(Boolean);
+  const records = [has("partner") && "partners", has("product") && "products"].filter(Boolean);
+  const recordTools = [has("partner") && "draft_partner", has("product") && "draft_product"].filter(Boolean);
+  const documentTools = [
+    ["sales_offer", "sales_order", "sales_bill_domestic", "purchase_bill_domestic"].some(has) && "draft_document",
+    has("sales_bill_credit_note") && "draft_credit_note",
+    (has("purchase_order") || has("warehouse_packing_list")) && "draft_stock_document",
+  ].filter(Boolean);
   const changes = [
-    docTypes.includes("payment") && "draft_payment records a payment on an existing invoice, offer or order (marks it paid)",
-    docTypes.includes("order_status") && "draft_order_status changes a sales order's status",
+    has("payment") && "draft_payment records a payment on an existing invoice, offer or order (marks it paid)",
+    (has("order_update") || has("invoice_update") || has("warehouse_update")) && "draft_update changes an existing order, invoice or warehouse document (status, tracking code …)",
+    has("partner_update") && "draft_partner_update changes a partner",
+    has("product_update") && "draft_product_update changes a product (e.g. price, safety stock)",
+    has("shipping") && "draft_shipping prints delivery labels, marks orders shipped or groups them",
+    has("complaint") && "draft_complaint creates or updates a complaint",
+    has("message") && "draft_message sends an SMS, Viber, WhatsApp or e-mail to a customer (only what the user asked for; it can't be recalled)",
   ].filter(Boolean);
   const missing = records.length
     ? `never guess ids. If a partner or product is missing, ask the user whether to add it; only then use ${recordTools.join(" / ")} ` +
       `(copy its data from the document), confirm and save it, and continue with the new id${records.length < 2 ? `; ${records[0] === "partners" ? "products" : "partners"} are never created here` : ""}. `
     : "never guess ids and never create partners or products. ";
-  const draftTools = [docTypes.some((t) => !["partner", "product", "payment", "order_status"].includes(t)) && "draft_document", ...recordTools].filter(Boolean);
-  const can = [...what, docTypes.includes("payment") && "record payments"].filter(Boolean);
+  const draftTools = [...documentTools, ...recordTools];
+  const can = [
+    ...(what.length ? [`create ${what.length > 1 ? `${what.slice(0, -1).join(", ")} and ${what.at(-1)}` : what[0]}`] : []),
+    has("payment") && "record payments",
+    changes.length > (has("payment") ? 1 : 0) && "change existing records",
+  ].filter(Boolean);
   return (
     "Access to one company's Metakocka ERP (Slovenian ERP / e-commerce back office): it reads data, and it can " +
-    `${what.length ? "create " : ""}${can.length > 1 ? `${can.slice(0, -1).join(", ")} and ${can.at(-1)}` : can[0]}. ` +
+    `${can.length > 1 ? `${can.slice(0, -1).join(", ")} and ${can.at(-1)}` : can[0]}. ` +
     (draftTools.length
       ? "To create a document: find the partner (search_partners) and products (search_products) and use " +
         `their ids — ${missing}Call ${draftTools.join(" / ")}, show its summary to the user, then commit_document. `

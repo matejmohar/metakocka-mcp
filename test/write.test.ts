@@ -197,20 +197,21 @@ describe("write tools are opt-in", () => {
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers" })).toMatchObject({ docTypes: ["sales_offer"], confirm: "client", timeoutMs: 120_000 });
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers", METAKOCKA_WRITE_CONFIRM: "elicitation" })?.confirm).toBe("elicitation");
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers", METAKOCKA_WRITE_CONFIRM: "never" })?.confirm).toBe("never");
-    expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers,invoices" })?.docTypes).toEqual(["sales_offer", "sales_bill_domestic", "sales_bill_foreign"]);
-    expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "invoices" })?.docTypes).toEqual(["sales_bill_domestic", "sales_bill_foreign"]);
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers,invoices" })?.docTypes).toEqual(["sales_offer", "sales_bill_domestic", "sales_bill_foreign", "sales_bill_prepaid", "invoice_update"]);
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "invoices" })?.docTypes).toEqual(["sales_bill_domestic", "sales_bill_foreign", "sales_bill_prepaid", "invoice_update"]);
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_PURCHASE_INVOICES: "true" })?.docTypes).toEqual(["purchase_bill_domestic", "purchase_bill_foreign"]);
-    expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "partners,products" })?.docTypes).toEqual(["partner", "product"]);
-    expect(writeSettingsFromEnv({ METAKOCKA_WRITE_PARTNERS: "true", METAKOCKA_WRITE_PRODUCTS: "false" })?.docTypes).toEqual(["partner"]);
-    expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "payments,orders" })?.docTypes).toEqual(["payment", "sales_order", "order_status"]);
-    expect(writeSettingsFromEnv({ METAKOCKA_WRITE_PAYMENTS: "true", METAKOCKA_WRITE_ORDERS: "true" })?.docTypes).toEqual(["payment", "sales_order", "order_status"]);
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "partners,products" })?.docTypes).toEqual(["partner", "partner_update", "product", "product_update"]);
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE_PARTNERS: "true", METAKOCKA_WRITE_PRODUCTS: "false" })?.docTypes).toEqual(["partner", "partner_update"]);
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "payments,orders" })?.docTypes).toEqual(["payment", "sales_order", "order_update"]);
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE_PAYMENTS: "true", METAKOCKA_WRITE_ORDERS: "true" })?.docTypes).toEqual(["sales_order", "order_update", "payment"]);
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE_SHIPPING: "true", METAKOCKA_WRITE_MESSAGES: "true" })?.docTypes).toEqual(["shipping", "message"]);
     expect(() => writeSettingsFromEnv({ METAKOCKA_WRITE: "offers,order" })).toThrow(ConfigError);
     // The Claude Desktop extension's checkboxes.
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "false", METAKOCKA_WRITE_CONFIRM: "true" })).toBeUndefined();
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "true", METAKOCKA_WRITE_CONFIRM: "true" })).toMatchObject({ docTypes: ["sales_offer"], confirm: "client" });
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "true", METAKOCKA_WRITE_CONFIRM: "false" })?.confirm).toBe("never");
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "${user_config.allow_offers}" })).toBeUndefined();
-    expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "false", METAKOCKA_WRITE_INVOICES: "true" })?.docTypes).toEqual(["sales_bill_domestic", "sales_bill_foreign"]);
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "false", METAKOCKA_WRITE_INVOICES: "true" })?.docTypes).toEqual(["sales_bill_domestic", "sales_bill_foreign", "sales_bill_prepaid", "invoice_update"]);
     expect(() => writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "yes please" })).toThrow(ConfigError);
     expect(() => writeSettingsFromEnv({ METAKOCKA_WRITE: "offers", METAKOCKA_WRITE_CONFIRM: "sometimes" })).toThrow(ConfigError);
     expect(() => writeSettingsFromEnv({ METAKOCKA_WRITE: "offers", METAKOCKA_WRITE_CONFIRM: "always" })).toThrow(ConfigError);
@@ -1037,7 +1038,7 @@ function parseDraft(r: Awaited<ReturnType<Client["callTool"]>>) {
 }
 
 describe("sales orders", () => {
-  const ORDERS: WriteSettings = { docTypes: ["sales_bill_domestic", "sales_order", "order_status"], confirm: "never", timeoutMs: 120_000 };
+  const ORDERS: WriteSettings = { docTypes: ["sales_bill_domestic", "sales_order", "order_update"], confirm: "never", timeoutMs: 120_000 };
   const ORDER = { doc_type: "sales_order", partner_id: "400068941553", lines: [{ product_id: "P1", quantity: 2 }] };
 
   it("drafts and saves a sales order with the customer's order number and delivery date", async () => {
@@ -1113,40 +1114,64 @@ describe("sales orders", () => {
     expect(Object.keys((tool.inputSchema as { properties: object }).properties)).not.toContain("from_order");
   });
 
-  it("changes an order's status, checking it against the statuses in use and reading it back", async () => {
-    let status: string | undefined = "Novo naročilo";
-    const changes: Body[] = [];
+  it("changes an order's status and tracking code with draft_update, checking statuses in use and reading it back", async () => {
+    let order: Record<string, unknown> = { mk_id: "SO9", count_code: "PP-9", status_code: "Novo naročilo", partner: { mk_id: "400068941553", customer: "ACME d.o.o." } };
+    const updates: Body[] = [];
     const fake = metakocka({
       search: (body) =>
         body.query === "PP-9"
           ? { opr_code: "0", result: [{ mk_id: "SO9", count_code: "PP-9" }] }
           : { opr_code: "0", result: [{ count_code: "PP-1", status_code: "Novo naročilo" }, { count_code: "PP-2", status_code: "Odpremljen" }] },
       handlers: {
-        get_document: () => ({ opr_code: "0", mk_id: "SO9", count_code: "PP-9", status_code: status, partner: { mk_id: "400068941553", customer: "ACME d.o.o." } }),
-        change_document_status: (body) => {
-          changes.push(body);
+        get_document: () => ({ opr_code: "0", ...order }),
+        update_document: (body) => {
+          updates.push(body);
           if (body.status_code === "Izgubljen") return { opr_code: "1", opr_desc: "Dinamični šifrant z vrednostjo ''Izgubljen'' tipa ''Prodajna naročila - status'' mora biti nastavljen" };
-          status = String(body.status_code);
+          const { company_id: _c, secret_key: _s, doc_type: _t, mk_id: _m, ...fields } = body;
+          order = { ...order, ...fields, ...(fields.shipped_date ? { shipped_date: "2026-10-05+02:00" } : {}) };
           return { opr_code: "0" };
         },
       },
     });
     const { client } = await connect(fake, { write: quiet(ORDERS) });
-    expect(parse(await client.callTool({ name: "draft_order_status", arguments: { number: "PP-9", status: "novo naročilo" } }))).toMatch(/already has the status Novo naročilo/);
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names).toContain("draft_update");
+    expect(names).not.toContain("draft_shipping");
+    const update = async (args: Record<string, unknown>) => parse(await client.callTool({ name: "draft_update", arguments: { doc_type: "sales_order", number: "PP-9", ...args } }));
 
-    const bad = parse(await client.callTool({ name: "draft_order_status", arguments: { number: "PP-9", status: "Izgubljen" } }));
+    expect(await update({ status: "novo naročilo" })).toMatch(/already has all of that/);
+    expect(await update({})).toMatch(/Nothing to change\. sales_order takes: status, tracking_code/);
+
+    const bad = await update({ status: "Izgubljen" });
     expect(bad.warnings[0]).toMatch(/statuses in use: Novo naročilo, Odpremljen/);
     const refused = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: bad.draft_id } }));
     expect(refused).toMatchObject({ status: "rejected" });
-    expect(refused.message).toMatch(/Prodajna naročila - status\), spelled exactly/);
 
-    const ok = parse(await client.callTool({ name: "draft_order_status", arguments: { number: "PP-9", status: "Odpremljen" } }));
-    expect(ok.warnings).toBeUndefined();
-    expect(ok.summary).toBe("Spremeni STATUS prodajnega naročila PP-9 (ACME d.o.o.)\nNovo naročilo → Odpremljen");
+    const ok = await update({ status: "Odpremljen", tracking_code: "TC1", shipped_date: "2026-10-05" });
+    expect(ok.summary).toBe(
+      "Spremeni sales_order PP-9 (ACME d.o.o.)\n  status: Novo naročilo → Odpremljen\n  tracking_code: (prazno) → TC1\n  shipped_date: (prazno) → 2026-10-05",
+    );
     const done = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: ok.draft_id } }));
-    expect(done).toMatchObject({ status: "created", number: "PP-9", order_status: "Odpremljen", warnings: [] });
-    const { company_id: _c, secret_key: _s, ...sent } = changes.at(-1)!;
-    expect(sent).toEqual({ doc_type: "sales_order", mk_id: "SO9", status_code: "Odpremljen" });
+    expect(done).toMatchObject({ status: "created", number: "PP-9", warnings: [] });
+    const { company_id: _c, secret_key: _s, ...sent } = updates.at(-1)!;
+    expect(sent).toEqual({ doc_type: "sales_order", mk_id: "SO9", status_code: "Odpremljen", tracking_code: "TC1", shipped_date: "05.10.2026" });
+  });
+
+  it("create_invoice can't be read back: a lost answer leaves it to the user", async () => {
+    const fake = metakocka({
+      search: () => ({ opr_code: "0", result: [{ mk_id: "SO9", count_code: "PP-9" }] }),
+      handlers: {
+        get_document: () => ({ opr_code: "0", mk_id: "SO9", count_code: "PP-9", partner: { customer: "ACME d.o.o." } }),
+        update_document: () => new Response("", { status: 502 }),
+      },
+    });
+    const { client } = await connect(fake, { write: quiet(ORDERS) });
+    const body = parse(await client.callTool({ name: "draft_update", arguments: { doc_type: "sales_order", number: "PP-9", create_invoice: true } }));
+    expect(body.warnings[0]).toMatch(/use draft_document with from_order/);
+    expect(parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }))).toMatchObject({ status: "unknown" });
+    const again = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
+    expect(again.status).toBe("unknown");
+    expect(fake.calls.filter((c) => c.endpoint === "update_document")).toHaveLength(1);
   });
 });
 
@@ -1264,5 +1289,309 @@ describe("payments", () => {
     const second = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
     expect(second).toMatchObject({ status: "created", paid_now: 700, warnings: ["The save had not answered; the payment was found on the document afterwards."] });
     expect(transactions).toHaveLength(1);
+  });
+});
+
+describe("credit notes, prepayment invoices, purchase and warehouse documents", () => {
+  const SETTINGS_ALL: WriteSettings = {
+    docTypes: ["sales_bill_domestic", "sales_bill_prepaid", "sales_bill_credit_note", "purchase_order", "warehouse_packing_list", "warehouse_acceptance_note", "transfer_order", "workorder"],
+    confirm: "never",
+    timeoutMs: 120_000,
+  };
+  const INVOICE = {
+    mk_id: "INV7",
+    doc_type: "sales_bill_domestic",
+    count_code: "RD-7/2026",
+    partner: { mk_id: "400068941553", mk_address_id: "400079138037", customer: "ACME d.o.o." },
+    currency_code: "EUR",
+    product_list: [
+      { mk_id: "P1", code: "SVC-H", amount: "3", price: "30", discount: "0", tax: "EX4" },
+      { mk_id: "P8", code: "BOX", amount: "2", price: "10", discount: "0", tax: "EX4" },
+    ],
+    sum_all: "134.2",
+  };
+  const ORDER = { ...INVOICE, mk_id: "SO3", doc_type: "sales_order", count_code: "3/2026" };
+  const WAREHOUSES = { opr_code: "0", warehouse_list: [{ mk_id: "W1", mark: "glavno", name: "Glavno skladišče" }, { mk_id: "W2", mark: "mb", name: "Maribor" }] };
+  const BOX = { mk_id: "P8", count_code: "8", code: "BOX", name: "Škatla", unit: "kos", service: "false", sales: "true", purchasing: "true", activated: "true", pricelist: priced("EX4", "22", "10") };
+  const fake = () =>
+    metakocka({
+      products: [...PRODUCTS, BOX],
+      documents: { INV7: INVOICE, SO3: ORDER },
+      search: (body) => {
+        const hit = [INVOICE, ORDER].find((d) => d.doc_type === body.doc_type && d.count_code === body.query);
+        return { opr_code: "0", result_all_records: hit ? "1" : "0", result: hit ? [hit] : [] };
+      },
+      handlers: { "json/warehouse_list": () => WAREHOUSES },
+    });
+
+  it("credits returned goods at the invoice's prices, at most what was invoiced", async () => {
+    const f = fake();
+    const { client } = await connect(f, { write: quiet(SETTINGS_ALL) });
+    const call = async (args: Record<string, unknown>) => parse(await client.callTool({ name: "draft_credit_note", arguments: args }));
+    expect(await call({ credit_type: "goods", from_invoice: "RD-7/2026", lines: [{ code: "BOX", quantity: 3 }] })).toMatch(/at most 2, as invoiced/);
+    expect(await call({ credit_type: "goods", from_invoice: "RD-7/2026", lines: [{ code: "SVC-D", quantity: 1 }] })).toMatch(/SVC-D is not on invoice RD-7\/2026/);
+    expect(await call({ credit_type: "financial", from_invoice: "RD-7/2026", lines: [{ code: "BOX", quantity: 1 }] })).toMatch(/financial credit note takes only services/);
+    expect(await call({ credit_type: "financial", from_invoice: "RD-7/2026", lines: [{ code: "SVC-H", quantity: 10 }] })).toMatch(/more than invoice RD-7\/2026/);
+
+    const body = await call({ credit_type: "goods", from_invoice: "RD-7/2026", lines: [{ code: "BOX", quantity: 1 }] });
+    expect(body.summary).toMatch(/^Ustvari DOBROPIS \(neizdan\) — vračilo blaga — za ACME d\.o\.o\. \(SI12345678\)\nGlavna 1, 1000 Ljubljana, Slovenia\nK računu: RD-7\/2026\n/);
+    expect(body.totals).toMatchObject({ net: 10, gross: 12.2 });
+    await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } });
+    const { company_id: _c, secret_key: _s, document_change_log_notes: _n, ...sent } = f.puts()[0]!.body;
+    expect(sent).toEqual({
+      doc_type: "sales_bill_credit_note",
+      doc_date: "05.10.2026",
+      service_to_date: "05.10.2026",
+      duo_payment: "05.10.2026",
+      credit_note_type: "goods",
+      credit_note_bill: "RD-7/2026",
+      partner: { mk_id: "400068941553", mk_address_id: "400079138037" },
+      currency_code: "EUR",
+      product_list: [{ mk_id: "P8", code: "BOX", count_code: "8", amount: "1", price: "10", discount: "0", tax: "EX4" }],
+    });
+    const whole = await call({ credit_type: "goods", from_invoice: "RD-7/2026" });
+    expect(whole.warnings).toEqual(["This credits invoice RD-7/2026 in full."]);
+  });
+
+  it("drafts a prepayment invoice like an invoice", async () => {
+    const f = fake();
+    const { client } = await connect(f, { write: quiet(SETTINGS_ALL) });
+    const { body } = await draft(client, { doc_type: "sales_bill_prepaid", partner_id: "400068941553", lines: [{ product_id: "P1", quantity: 1 }], due_days: 8 });
+    expect(body.summary).toMatch(/^Ustvari AVANSNI RAČUN \(neizdan\) za ACME/);
+    await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } });
+    expect(f.puts()[0]!.body.doc_type).toBe("sales_bill_prepaid");
+  });
+
+  it("makes a packing list from a sales order, linked to it, and says it takes the goods out of stock", async () => {
+    const f = fake();
+    const { client } = await connect(f, { write: quiet(SETTINGS_ALL) });
+    const call = async (args: Record<string, unknown>) => parse(await client.callTool({ name: "draft_stock_document", arguments: args }));
+    expect(await call({ doc_type: "warehouse_packing_list", from_order: "3/2026" })).toMatch(/Give the warehouse: Glavno skladišče, Maribor/);
+    expect(await call({ doc_type: "warehouse_packing_list", from_order: "3/2026", warehouse: "mb", to_warehouse: "glavno" })).toMatch(/to_warehouse: not for warehouse_packing_list/);
+    const body = await call({ doc_type: "warehouse_packing_list", from_order: "3/2026", warehouse: "Maribor" });
+    expect(body.warnings).toEqual(["Saving it takes the goods out of stock in Maribor."]);
+    expect(body.summary).toMatch(/^Ustvari DOBAVNICO za ACME d\.o\.o\. \(SI12345678\)\nGlavna 1, 1000 Ljubljana, Slovenia\nIz prodajnega naročila: 3\/2026\nSkladišče: Maribor\n/);
+    await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } });
+    expect(f.puts()[0]!.body).toMatchObject({
+      doc_type: "warehouse_packing_list",
+      warehouse: "mb",
+      sales_order_list: [{ count_code: "3/2026" }],
+      product_list: [expect.objectContaining({ mk_id: "P1", amount: "3", price: "30" }), expect.objectContaining({ mk_id: "P8", amount: "2" })],
+    });
+  });
+
+  it("purchase orders and goods received notes take purchase prices and VAT rates", async () => {
+    const f = fake();
+    const { client } = await connect(f, { write: quiet(SETTINGS_ALL) });
+    const call = async (args: Record<string, unknown>) => parse(await client.callTool({ name: "draft_stock_document", arguments: args }));
+    expect(await call({ doc_type: "purchase_order", partner_id: "400068941553", lines: [{ code: "BOX", quantity: 5, price: 4 }] })).toMatch(/give vat_percent/);
+    const po = await call({ doc_type: "purchase_order", partner_id: "400068941553", lines: [{ code: "BOX", quantity: 5, price: 4, vat_percent: 22 }], delivery_date: "2026-10-20", warehouse: "glavno" });
+    expect(po.summary).toMatch(/^Ustvari NAROČILNICO za ACME/);
+    await client.callTool({ name: "commit_document", arguments: { draft_id: po.draft_id } });
+    expect(f.puts()[0]!.body).toMatchObject({ doc_type: "purchase_order", warehouse_delivery: "glavno", delivery_date: "20.10.2026", product_list: [{ mk_id: "P8", amount: "5", price: "4", tax: "EX4" }] });
+
+    const gr = await call({ doc_type: "warehouse_acceptance_note", partner_id: "400068941553", warehouse: "glavno", supplier_document: "DOB-55", lines: [{ code: "BOX", quantity: 5, price: 4, vat_percent: 22 }] });
+    expect(gr.warnings).toEqual(["Saving it puts the goods into stock in Glavno skladišče."]);
+    await client.callTool({ name: "commit_document", arguments: { draft_id: gr.draft_id } });
+    expect(f.puts()[1]!.body).toMatchObject({ doc_type: "warehouse_acceptance_note", warehouse: "glavno", packlist_code: "DOB-55" });
+  });
+
+  it("transfers between warehouses and work orders go to their own endpoints", async () => {
+    const f = metakocka({
+      products: [...PRODUCTS, BOX],
+      documents: { SO3: ORDER },
+      search: (body) => ({ opr_code: "0", result: body.query === "3/2026" ? [ORDER] : [] }),
+      handlers: {
+        "json/warehouse_list": () => WAREHOUSES,
+        put_document_transfer_order: () => ({ opr_code: "0", mk_id: "T1" }),
+        put_document_workorder: () => ({ opr_code: "0", mk_id: "WO1", count_code: "DN-1" }),
+        get_document: (body) =>
+          body.doc_id === "T1"
+            ? { opr_code: "0", product_list: [{ mk_id: "P8", amount: "2" }] }
+            : body.doc_id === "SO3"
+              ? { opr_code: "0", ...ORDER }
+              : { opr_code: "0", partner: { mk_id: "400068941553", mk_address_id: "400079138037" }, product_list: [] },
+      },
+    });
+    const { client } = await connect(f, { write: quiet(SETTINGS_ALL) });
+    const call = async (args: Record<string, unknown>) => parse(await client.callTool({ name: "draft_stock_document", arguments: args }));
+    expect(await call({ doc_type: "transfer_order", warehouse: "glavno", to_warehouse: "Glavno skladišče", lines: [{ code: "BOX", quantity: 2 }] })).toMatch(/are the same/);
+    expect(await call({ doc_type: "transfer_order", warehouse: "glavno", to_warehouse: "mb", lines: [{ code: "SVC-H", quantity: 2 }] })).toMatch(/is a service/);
+    const t = await call({ doc_type: "transfer_order", warehouse: "glavno", to_warehouse: "mb", confirm: true, lines: [{ code: "BOX", quantity: 2 }] });
+    expect(t.summary).toMatch(/^Ustvari MEDSKLADIŠČNI PRENOS Glavno skladišče → Maribor \(potrjen: premakne zalogo\)\n\n  1\. 2 × Škatla kos\n/);
+    const saved = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: t.draft_id } }));
+    expect(saved).toMatchObject({ status: "created", mk_id: "T1", warnings: [] });
+    const transfer = f.calls.find((c) => c.endpoint === "put_document_transfer_order")!.body;
+    expect(transfer).toMatchObject({ doc_date: "05.10.2026", warehouseIdFrom: "W1", warehouseIdTo: "W2", confirmed: "true", product_list: [{ mk_id: "P8", amount: "2" }] });
+
+    const wo = await call({ doc_type: "workorder", from_order: "3/2026", title: "Izdelava", delivery_date: "2026-10-30" });
+    await client.callTool({ name: "commit_document", arguments: { draft_id: wo.draft_id } });
+    expect(f.calls.find((c) => c.endpoint === "put_document_workorder")!.body).toMatchObject({
+      start_date: "05.10.2026",
+      produce_deadline_date: "30.10.2026",
+      title: "Izdelava",
+      sales_order_list: [{ count_code: "3/2026" }],
+      partner: { mk_id: "400068941553" },
+    });
+  });
+});
+
+describe("changing partners and products", () => {
+  const RECORDS: WriteSettings = { docTypes: ["partner", "partner_update", "product", "product_update"], confirm: "never", timeoutMs: 120_000 };
+
+  it("changes only the partner fields given, shows old and new, and reads it back", async () => {
+    const updates: Body[] = [];
+    const f = metakocka({
+      handlers: {
+        update_partner: (body) => {
+          updates.push(body);
+          const p = body.partner as Body;
+          Object.assign(f.partners[0]!, { supplier: p.supplier, buyer: p.buyer });
+          return { opr_code: "0" };
+        },
+      },
+    });
+    Object.assign(f.partners[0]!, { buyer: "true", supplier: "false" });
+    const { client } = await connect(f, { write: quiet(RECORDS) });
+    expect(parse(await client.callTool({ name: "draft_partner_update", arguments: { partner_id: "400068941553", role: "buyer" } }))).toMatch(/Nothing to change/);
+    const body = parse(await client.callTool({ name: "draft_partner_update", arguments: { partner_id: "400068941553", role: "both" } }));
+    expect(body.summary).toBe("Spremeni PARTNERJA ACME d.o.o. (SI12345678)\n  vloga: buyer → both");
+    const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
+    expect(r).toMatchObject({ status: "created", mk_id: "400068941553", warnings: [] });
+    expect(updates[0]!.partner).toEqual({ mk_id: "400068941553", supplier: "true", buyer: "true" });
+  });
+
+  it("changes a product's price on its one price list, and refuses tiered prices", async () => {
+    const products = [
+      { ...PRODUCTS[0], safety_stock: "2" },
+      { mk_id: "PT", count_code: "9", code: "TIER", name: "Stopnje", sales: "true", activated: "true", pricelist: [{ count_code: "1", sales_purchase: "sales", price_def: [{ amount_from: "0", amount_to: "10", price: "5", tax: "EX4" }, { amount_from: "10", price: "4", tax: "EX4" }] }] },
+    ];
+    const f = metakocka({
+      products,
+      handlers: {
+        "json/product_update": (body) => {
+          const p = products.find((x) => x.mk_id === body.mk_id) as Record<string, unknown>;
+          if (body.safety_stock) p.safety_stock = body.safety_stock;
+          if (body.pricelist) p.pricelist = priced("EX4", "22", String(((body.pricelist as Body[])[0]!.price_def as Body[])[0]!.price));
+          return { opr_code: "0", mk_id: body.mk_id };
+        },
+      },
+    });
+    const { client } = await connect(f, { write: quiet(RECORDS) });
+    expect(parse(await client.callTool({ name: "draft_product_update", arguments: { product_id: "PT", price: 3 } }))).toMatch(/has a tiered price/);
+    const body = parse(await client.callTool({ name: "draft_product_update", arguments: { product_id: "P1", price: 40, safety_stock: 5 } }));
+    expect(body.summary).toBe("Spremeni IZDELEK Svetovanje (šifra SVC-H)\n  varnostna zaloga: 2 → 5\n  cena (1): 35,00 € → 40,00 €");
+    const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
+    expect(r).toMatchObject({ status: "created", warnings: [] });
+    const sent = f.calls.find((c) => c.endpoint === "json/product_update")!.body;
+    expect(sent).toMatchObject({ mk_id: "P1", safety_stock: "5", pricelist: [{ count_code: "1", price_def: [{ amount_from: "0", amount_to: null, tax: "EX4", price: "40" }] }] });
+  });
+});
+
+describe("shipping, complaints and messages", () => {
+  const OUT: WriteSettings = { docTypes: ["shipping", "complaint", "message"], confirm: "never", timeoutMs: 120_000 };
+  const order = (n: string, over: Record<string, unknown> = {}) => ({
+    mk_id: `SO${n}`,
+    count_code: `PP-${n}`,
+    buyer_order: `WEB-${n}`,
+    partner: { mk_id: "400068941553", customer: "ACME d.o.o." },
+    product_list: [{ mk_id: "P8", code: "BOX", name: "Škatla", amount: "2" }],
+    ...over,
+  });
+
+  it("labels: reports per order, and after a lost answer checks the tracking codes instead of printing again", async () => {
+    const orders: Record<string, Record<string, unknown>> = { SO1: order("1"), SO2: order("2") };
+    let lose = false;
+    const f = metakocka({
+      search: (body) => ({ opr_code: "0", result: Object.values(orders).filter((o) => o.count_code === body.query) }),
+      handlers: {
+        get_document: (body) => ({ opr_code: "0", ...orders[String(body.doc_id)] }),
+        generate_sticker: () => {
+          orders.SO1!.tracking_code = "CF1SI";
+          if (lose) return new Response("", { status: 502 });
+          return {
+            opr_code: "0",
+            generate_sticker: [
+              { opr_code: "0", mk_id: "SO1", sales_order_count_code: "PP-1", sticker_public_url: "https://s3/l1.pdf", tracking_code: "CF1SI" },
+              { opr_code: "1", mk_id: "SO2", sales_order_count_code: "PP-2", error_desc: "Napačna poštna številka | " },
+            ],
+            generate_sticker_join_document: "https://s3/all.pdf",
+          };
+        },
+      },
+    });
+    const { client } = await connect(f, { write: quiet(OUT) });
+    const body = parse(await client.callTool({ name: "draft_shipping", arguments: { action: "labels", orders: ["PP-1", "PP-2"] } }));
+    expect(body.summary).toBe("Natisni NALEPKE dostavne službe za 2 naročil(a): PP-1, PP-2");
+    const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
+    expect(r).toMatchObject({
+      status: "created",
+      details: { labels: [{ order: "PP-1", tracking_code: "CF1SI", label_url: "https://s3/l1.pdf" }], failed: [{ order: "PP-2", error: "Napačna poštna številka" }], all_labels_pdf: "https://s3/all.pdf" },
+    });
+    expect(r.warnings).toContain("No label for PP-2 (Napačna poštna številka).");
+
+    delete orders.SO1!.tracking_code;
+    lose = true;
+    const again = parse(await client.callTool({ name: "draft_shipping", arguments: { action: "labels", orders: ["PP-1"] } }));
+    expect(parse(await client.callTool({ name: "commit_document", arguments: { draft_id: again.draft_id } }))).toMatchObject({ status: "unknown" });
+    const resolved = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: again.draft_id } }));
+    expect(resolved).toMatchObject({ status: "created" });
+    expect(f.calls.filter((c) => c.endpoint === "generate_sticker")).toHaveLength(2);
+  });
+
+  it("complaints: products must be on the order; updates need a status", async () => {
+    const f = metakocka({
+      search: (body) => ({ opr_code: "0", result: body.doc_type === "sales_order" && body.query === "PP-1" ? [order("1")] : body.doc_type === "complaint" && body.query === "RK-4" ? [{ mk_id: "C4", count_code: "RK-4" }] : [] }),
+      handlers: {
+        get_document: (body) => (body.doc_type === "complaint" ? { opr_code: "0", mk_id: "C4", count_code: "RK-4", claim_type: "return", claim_status: "draft" } : { opr_code: "0", ...order("1") }),
+        "../create_complaint": () => ({ opr_code: "0" }),
+        "../update_complaint": () => ({ opr_code: "0" }),
+      },
+    });
+    const { client } = await connect(f, { write: quiet(OUT) });
+    const call = async (args: Record<string, unknown>) => parse(await client.callTool({ name: "draft_complaint", arguments: args }));
+    expect(await call({ action: "create", claim_type: "return", order_number: "PP-1", products: [{ code: "BOX", quantity: 3 }] })).toMatch(/only 2 of Škatla were ordered/);
+    expect(await call({ action: "update", complaint_number: "RK-4" })).toMatch(/Give status/);
+    const body = await call({ action: "create", claim_type: "return", order_number: "PP-1", products: [{ code: "BOX", quantity: 1, reason: "poškodovano" }], iban: "SI56 0201 0001 2345 678" });
+    expect(body.summary).toMatch(/^Ustvari VRAČILO za naročilo PP-1 \(ACME d\.o\.o\.\)\nIzdelki:\n  1\. 1 × Škatla — poškodovano\nIBAN: SI56 0201 0001 2345 678/);
+    await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } });
+    const { company_id: _c, secret_key: _s, ...sent } = f.calls.find((c) => c.endpoint === "../create_complaint")!.body;
+    expect(sent).toEqual({
+      claim_type: "return",
+      sales_order_count_code: "PP-1",
+      partner: { iban: "SI56020100012345678" },
+      complaint_products: [{ mk_id: "P8", code: "BOX", amount: "1", complaint_reason: "poškodovano" }],
+    });
+    const upd = await call({ action: "update", complaint_number: "RK-4", status: "completed", note: "Vrnjeno" });
+    expect(upd.summary).toBe("Spremeni REKLAMACIJO RK-4\n  status: draft → completed\n  opomba: Vrnjeno");
+    await client.callTool({ name: "commit_document", arguments: { draft_id: upd.draft_id } });
+    expect(f.calls.find((c) => c.endpoint === "../update_complaint")!.body).toMatchObject({ claim_id: "C4", claim_type: "return", claim_status: "completed", claim_note: "Vrnjeno" });
+  });
+
+  it("messages: shows exactly what is sent, reports a refused message, and never resends after a lost answer", async () => {
+    let answer: unknown = { opr_code: "0", message_list: [{ mk_id: "19", sender_message_id: "m1", status: "ok" }] };
+    const f = metakocka({ handlers: { "../send_message": () => answer } });
+    const { client } = await connect(f, { write: quiet(OUT) });
+    const call = async (args: Record<string, unknown>) => parse(await client.callTool({ name: "draft_message", arguments: args }));
+    expect(await call({ channel: "sms", to_number: "041 111 222", text: "x", subject: "y" })).toMatch(/subject is only for e-mail/);
+    const sms = await call({ channel: "sms", to_number: "041 111 222", country: "SI", text: "Paket je na poti." });
+    expect(sms.summary).toBe("POŠLJI SMS (takoj, ni ga mogoče preklicati)\nZa: 041 111 222 (SI)\n\nPaket je na poti.");
+    expect(parse(await client.callTool({ name: "commit_document", arguments: { draft_id: sms.draft_id } }))).toMatchObject({ status: "created", mk_id: "19" });
+    expect(f.calls.at(-1)!.body.message_list).toEqual([{ type: "sms", to_number: "041 111 222", receiver_country: "SI", message: "Paket je na poti.", message_type: "transactional" }]);
+
+    const mail = await call({ channel: "email", to_emails: ["janez@example.com"], from_email: "shop@martej.com", subject: "Naročilo", body: "Pozdravljeni,\n\nhvala <3" });
+    answer = { opr_code: "0", message_list: [{ sender_message_id: "m1", status: "error", error_desc: "email_to_list : ni veljaven" }] };
+    const refused = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: mail.draft_id } }));
+    expect(refused).toMatchObject({ status: "rejected", message: "Metakocka did not send the message: email_to_list : ni veljaven" });
+    expect((f.calls.at(-1)!.body.message_list as Body[])[0]!.email_html_body).toBe("<p>Pozdravljeni,</p><p>hvala &lt;3</p>");
+
+    answer = new Response("", { status: 502 });
+    const lost = await call({ channel: "sms", to_number: "041 111 222", text: "Še enkrat." });
+    const first = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: lost.draft_id } }));
+    expect(first.status).toBe("unknown");
+    expect(first.message).toMatch(/can't be checked automatically: check with get_messages/);
+    const second = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: lost.draft_id } }));
+    expect(second.status).toBe("unknown");
+    expect(f.calls.filter((c) => c.endpoint === "../send_message")).toHaveLength(3);
   });
 });

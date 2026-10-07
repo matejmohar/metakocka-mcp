@@ -5,6 +5,7 @@
  */
 import { randomBytes } from "node:crypto";
 import type { MkRecord } from "../api.js";
+import type { ChangeSpec } from "./change.js";
 import type { WritableDocType } from "./settings.js";
 
 export type DraftStatus =
@@ -71,8 +72,12 @@ export interface Draft {
     statusBefore?: string;
     status?: string;
   };
+  /** New documents Metakocka saves with their own endpoint instead of put_document (transfers, work orders). */
+  putEndpoint?: string;
+  /** For changes saved with their own call (see change.ts): which call, and how to tell it took effect. */
+  change?: ChangeSpec;
   /** Set once committed. */
-  result?: { mkId?: string; number?: string; /** A new partner's address. */ addressId?: string };
+  result?: { mkId?: string; number?: string; /** A new partner's address. */ addressId?: string; /** What a change call answered, for the tool's result. */ details?: Record<string, unknown> };
 }
 
 export const DRAFT_TTL_MS = 15 * 60_000;

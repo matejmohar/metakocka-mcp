@@ -16,9 +16,9 @@ Connect it to Claude (or any MCP-capable assistant) and ask questions about your
 - *"Prepare September's export for the accountant."*
 
 > **Read-only by default.** Out of the box it cannot create, change or delete anything in Metakocka; the only things it
-> writes are PDFs and accounting exports on your own computer, when you ask for one. Creating offers, sales orders, invoices,
-> received invoices, partners and products, recording payments and changing an order's status can be turned on:
-> see [Creating documents](#creating-documents). It never deletes anything.
+> writes are PDFs and accounting exports on your own computer, when you ask for one. Writing can be turned on per area —
+> documents, payments, changes to orders, partners and products, shipping, complaints, messages to customers — and every
+> write is confirmed by you: see [Creating documents](#creating-documents). It never deletes anything.
 
 > This is an independent community project. It is not made or endorsed by Metakocka d.o.o.
 
@@ -63,6 +63,7 @@ vir `metakocka://document-types` pa vsebuje tudi vsakdanje izraze. Vsi pozivi (n
 | `get_proof_of_delivery` | The delivery service's proof of delivery for an order's parcel, saved as a file. |
 | `get_delivery_prices` | Delivery price lists per delivery type and package weight. |
 | `check_blacklist` | Whether a customer is on the company's blacklist (črna lista), by e-mail, phone or name. |
+| `get_email_events` | Whether e-mails sent through Metakocka were delivered, opened, clicked or bounced. |
 | **Partners** | |
 | `search_partners` | Customers and suppliers by name, tax number, e-mail or phone. |
 | `get_partner` | One partner in full, with what they owe us and what we owe them (open, overdue, aging). |
@@ -76,14 +77,19 @@ vir `metakocka://document-types` pa vsebuje tudi vsakdanje izraze. Vsi pozivi (n
 | `get_cash_register` | Cash register journals (blagajna): opening and closing cash, receipts, expenses and deposits to the bank. |
 | `get_compensations` | Compensations (kompenzacije): which of our invoices and the partner's were settled against each other. |
 | `accounting_export` | The export for the accountant (izvoz v računovodstvo), run with your export profiles from Metakocka and saved as a ZIP. |
-| **Creating documents** (off unless turned on, see [Creating documents](#creating-documents)) | |
-| `draft_document` | Prepare an offer, sales order, invoice or received invoice from partners and products that already exist in Metakocka, without saving it. |
-| `draft_partner` | Prepare a new partner (e.g. a supplier, from its invoice) that isn't in Metakocka yet, without saving it. |
-| `draft_product` | Prepare a new product (e.g. to book a received invoice to), without saving it. |
-| `draft_payment` | Prepare a payment on an existing invoice, offer or order (mark it paid, a supplier paid, a prepayment or a refund), without saving it. |
-| `draft_order_status` | Prepare a sales order's new status, without saving it. |
-| `commit_document` | Save a prepared document, partner, product, payment or status, exactly as prepared, after you confirm it. |
-| `discard_draft` | Drop a prepared document, partner or product. |
+| **Writing** (off unless turned on, see [Creating documents](#creating-documents)); every `draft_*` tool only prepares | |
+| `draft_document` | An offer, sales order, invoice, prepayment invoice or received invoice from partners and products that already exist in Metakocka. |
+| `draft_credit_note` | A credit note (dobropis) to an invoice: returned goods, a financial correction, or standalone. |
+| `draft_stock_document` | A purchase order, packing list, delivery or receiving order, goods received note, transfer between warehouses or work order. |
+| `draft_partner` / `draft_product` | A new partner or product that isn't in Metakocka yet. |
+| `draft_partner_update` / `draft_product_update` | A change to a partner's data, or to a product (e.g. its price or safety stock). |
+| `draft_payment` | A payment on an existing invoice, offer or order (mark it paid, a supplier paid, a prepayment or a refund). |
+| `draft_update` | A change Metakocka's API allows on an existing order (status, tracking code, shipping date, invoicing it), invoice (status) or warehouse document. |
+| `draft_shipping` | Delivery labels, marking orders shipped, or a group expedition. |
+| `draft_complaint` | A complaint, return or replacement for an order, or a complaint's new status. |
+| `draft_message` | An SMS, Viber, WhatsApp or e-mail to a customer. |
+| `commit_document` | Save (or send) a draft, exactly as prepared, after you confirm it. |
+| `discard_draft` | Drop a draft. |
 
 ### Prompts
 
@@ -177,8 +183,8 @@ newer version exists.
 | `METAKOCKA_TIMEOUT_MS` | no | `30000` (or `METAKOCKA_TIMEOUT_SECONDS`) |
 | `METAKOCKA_CACHE_SECONDS` | no | `300` — how long warehouses and partner lookups are reused; `0` turns caching off |
 | `METAKOCKA_PDF_DIR` | no | `Downloads/Metakocka` — where `get_document_pdf`, `get_proof_of_delivery` and `accounting_export` save files |
-| `METAKOCKA_USER_EMAIL` | no | E-mail of a Metakocka user, which `check_blacklist` sends when Metakocka asks who is searching |
-| `METAKOCKA_WRITE` | no | off — comma-separated `offers`, `orders`, `invoices`, `purchase_invoices`, `partners`, `products`, `payments`, see [Creating documents](#creating-documents) |
+| `METAKOCKA_USER_EMAIL` | no | E-mail of a Metakocka user, which `check_blacklist` and `draft_complaint` send when Metakocka asks who is making the call |
+| `METAKOCKA_WRITE` | no | off — comma-separated `offers`, `orders`, `invoices`, `credit_notes`, `purchase_invoices`, `purchase_orders`, `warehouse`, `partners`, `products`, `payments`, `shipping`, `complaints`, `messages`, see [Creating documents](#creating-documents) |
 | `METAKOCKA_WRITE_CONFIRM` | no | `client` — you confirm each document in a prompt, or by approving the save in your client; `elicitation` — prompts only; `never` — no confirmation |
 | `METAKOCKA_WRITE_TIMEOUT_SECONDS` | no | `120` — how long to wait for Metakocka to save a document |
 | `METAKOCKA_WRITE_LOG` | no | `~/.metakocka-mcp/writes.jsonl` — audit log of every write |
@@ -234,9 +240,25 @@ because secret keys travel in the request headers.
 
 ## Creating documents
 
-Off by default. Turn it on with `METAKOCKA_WRITE` set to any of `offers`, `orders`, `invoices`, `purchase_invoices`,
-`partners`, `products`, `payments` (comma-separated), or with the matching **Allow …** settings in the Claude Desktop
-extension. Claude can then create:
+Off by default, and turned on per area with `METAKOCKA_WRITE` (comma-separated) or the matching **Allow …** settings in
+the Claude Desktop extension:
+
+| Value | Lets Claude |
+|---|---|
+| `offers` | create offers |
+| `orders` | create sales orders and invoices from them; change an order (status, tracking code, shipping date, have Metakocka invoice it) |
+| `invoices` | create invoices and prepayment invoices; change an invoice's status |
+| `credit_notes` | create credit notes to invoices |
+| `purchase_invoices` | enter received invoices |
+| `purchase_orders` | create purchase orders |
+| `warehouse` | create packing lists, goods received notes, delivery and receiving orders, transfers and work orders; change them |
+| `partners` / `products` | add missing partners / products, and change existing ones |
+| `payments` | record payments on invoices, offers and orders |
+| `shipping` | print delivery labels, mark orders shipped, make group expeditions |
+| `complaints` | create complaints, returns and replacements, and change their status |
+| `messages` | send SMS, Viber, WhatsApp and e-mail to customers |
+
+For example, Claude can create:
 
 - offers (ponudbe, also used as predračuni): *"Pripravi ponudbo za ACME za 10 ur svetovanja."*
 - sales orders (prodajna naročila): *"Vnesi naročilo ACME št. PO-77 za 20 kosov, dobava do 20. 10."*
@@ -249,7 +271,16 @@ and change documents that already exist:
 
 - payments (`payments`): *"ACME je plačal RD-2/2026."*, *"Avantu smo plačali račun 126-039951."*, a prepayment
   (avans) on an offer or order, or a refund
-- a sales order's status (`orders`): *"Naročilo PP-18495 je odpremljeno."*
+- an order, invoice or warehouse document (`orders`, `invoices`, `warehouse`): *"Naročilo PP-18495 je odpremljeno."*
+- a partner or product (`partners`, `products`): *"Dvigni ceno artikla ART-1 na 12 €."*, *"Varnostna zaloga za ART-1 naj bo 20."*
+
+and act for you:
+
+- credit notes (`credit_notes`): *"Kupec je vrnil 2 kosa z računa RD-7/2026."*
+- warehouse (`warehouse`, `purchase_orders`): *"Naredi dobavnico za naročilo 3/2026."*, *"Naroči 50 škatel pri dobavitelju X."*
+- shipping (`shipping`): *"Natisni nalepke za današnja naročila."*
+- complaints (`complaints`): *"Kupec vrača naročilo PP-1, paket je poškodovan."*
+- messages (`messages`): *"Pošlji kupcu SMS, da je paket na poti."* — sent right away, can't be recalled
 
 Strict rules, enforced by the server rather than left to the assistant:
 
@@ -330,10 +361,25 @@ Sales orders in particular:
 - **Invoice from an order.** *From order 1/2026* takes the order's partner and lines and links the invoice to it.
 - **Status** must be one of the company's own statuses (Šifranti → Prodajna naročila - status), spelled exactly. The API
   can't list them; the statuses on existing orders are offered as hints.
+- **Tracking code** only once the order has an invoice (Metakocka's rule).
+- **create_invoice** lets Metakocka make the invoice by the company's order settings (its type, numbering, and possibly a
+  packing list), not by this server's checks. To control the invoice, draft it *from order* instead.
+
+Credit notes, warehouse documents and other changes in particular:
+
+- **Credit notes** are saved not issued and can't credit more than their invoice; returned goods are credited at the
+  invoice's prices, a financial credit note takes only services.
+- **Stock**: packing lists take goods out of stock, goods received notes and confirmed transfers put them in; the
+  summary says so.
+- **Changes** show every old and new value in the summary, send only what changes, and are read back afterwards.
+- **Labels** register parcels with the delivery service. If the call doesn't answer, the orders' tracking codes are
+  checked before anything is printed again.
+- **Messages** are sent the moment you confirm and can't be recalled; a call that doesn't answer is never repeated
+  automatically. Check e-mails with `get_email_events`.
 
 Not supported yet: offers and orders to foreign partners, foreign invoices with VAT, partners with category discounts,
 currencies other than EUR (also on received invoices and payments), and lines that aren't products (Metakocka's API has
-no description-only lines). Saved documents can't be edited, and nothing can be deleted.
+no description-only lines). Only the fields Metakocka's API allows can be changed, and nothing can be deleted.
 
 In HTTP mode, writing also requires `METAKOCKA_HTTP_TOKEN`; drafts are kept per company and key.
 
