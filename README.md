@@ -248,7 +248,7 @@ the Claude Desktop extension:
 | `offers` | create offers |
 | `orders` | create sales orders and invoices from them; change an order (status, tracking code, shipping date, have Metakocka invoice it) |
 | `invoices` | create invoices and prepayment invoices; change an invoice's status |
-| `credit_notes` | create credit notes to invoices |
+| `credit_notes` | create credit notes to invoices, and enter suppliers' credit notes |
 | `purchase_invoices` | enter received invoices |
 | `purchase_orders` | create purchase orders |
 | `warehouse` | create packing lists, goods received notes, delivery and receiving orders, transfers and work orders; change them |
@@ -276,7 +276,7 @@ and change documents that already exist:
 
 and act for you:
 
-- credit notes (`credit_notes`): *"Kupec je vrnil 2 kosa z računa RD-7/2026."*
+- credit notes (`credit_notes`): *"Kupec je vrnil 2 kosa z računa RD-7/2026."*, *"Vnesi dobropis od Avanta."* (with the PDF)
 - warehouse (`warehouse`, `purchase_orders`): *"Naredi dobavnico za naročilo 3/2026."*, *"Naroči 50 škatel pri dobavitelju X."*
 - shipping (`shipping`): *"Natisni nalepke za današnja naročila."*
 - complaints (`complaints`): *"Kupec vrača naročilo PP-1, paket je poškodovan."*
@@ -368,7 +368,18 @@ Sales orders in particular:
 Credit notes, warehouse documents and other changes in particular:
 
 - **Credit notes** are saved not issued and can't credit more than their invoice; returned goods are credited at the
-  invoice's prices, a financial credit note takes only services.
+  invoice's prices, a financial credit note takes only services. A supplier's credit note is copied as printed (its
+  number, date, lines with VAT, checked against its total) and refused if already entered; for returned goods Metakocka
+  also makes a goods received note.
+
+Foreign partners and currencies:
+
+- **Foreign partners** can get offers, orders, invoices and prepayment invoices. Lines carry no VAT by default (reverse
+  charge, export: the catalogue's 0 % tax code); a line's `vat_percent` charges VAT. The draft warns when a
+  VAT-registered foreign business is charged VAT, or a foreign private person isn't. An invoice without VAT takes the
+  VAT note of the partner's last foreign invoice unless one is given.
+- **Other currencies** (`currency`, e.g. USD) on sales documents, received invoices and credit notes: price lists are in
+  EUR, so every price is given. A document made from another one takes its currency; payments are in the document's.
 - **Stock**: packing lists take goods out of stock, goods received notes and confirmed transfers put them in; the
   summary says so.
 - **Changes** show every old and new value in the summary, send only what changes, and are read back afterwards.
@@ -377,9 +388,9 @@ Credit notes, warehouse documents and other changes in particular:
 - **Messages** are sent the moment you confirm and can't be recalled; a call that doesn't answer is never repeated
   automatically. Check e-mails with `get_email_events`.
 
-Not supported yet: offers and orders to foreign partners, foreign invoices with VAT, partners with category discounts,
-currencies other than EUR (also on received invoices and payments), and lines that aren't products (Metakocka's API has
-no description-only lines). Only the fields Metakocka's API allows can be changed, and nothing can be deleted.
+Not supported yet: partners with category discounts, and products with tiered or several prices when changing a price.
+Lines must be products (Metakocka's API has no description-only lines). Only the fields Metakocka's API allows can be
+changed, and nothing can be deleted.
 
 In HTTP mode, writing also requires `METAKOCKA_HTTP_TOKEN`; drafts are kept per company and key.
 

@@ -25,6 +25,8 @@ import {
   totalsOf,
   type BuildContext,
   type LineInput,
+  currencyCode,
+  foreignVatWarnings,
   type TaxFallback,
 } from "./document.js";
 import type { Draft, DraftLine } from "./drafts.js";
@@ -48,6 +50,8 @@ export interface InvoiceInput {
   due_days?: number;
   title?: string;
   note?: string;
+  /** ISO currency (default EUR, or the offer's / order's); other currencies need every price given. */
+  currency?: string;
   language?: "sl" | "en";
 }
 
@@ -90,9 +94,6 @@ export async function buildInvoiceDraft(
   if (!partnerId) throw new DraftError("Give partner_id (from search_partners).");
 
   const partner = await resolvePartner(ctx.client, partnerId, { foreign: "allow", what: "Invoices" });
-  if (input.doc_type === "sales_bill_prepaid" && partner.foreign) {
-    throw new DraftError(`${partner.name} is a foreign partner; prepayment invoices for foreign partners are not supported yet. Create it in Metakocka.`);
-  }
   if (input.doc_type !== "sales_bill_prepaid" && partner.foreign !== foreignInvoice) {
     throw new DraftError(
       partner.foreign
@@ -118,6 +119,10 @@ export async function buildInvoiceDraft(
     return history;
   };
 
+  const sourceCurrency = offer ? str(offer.currency_code) ?? "EUR" : undefined;
+  if (offer && input.currency && currencyCode(input.currency) !== sourceCurrency) throw new DraftError(`${sourceLabel} is in ${sourceCurrency}; the invoice takes its currency.`);
+  const currency = sourceCurrency ?? currencyCode(input.currency);
+
   const catalog = await loadCatalog(ctx.client, ctx.cache, ctx.today);
   let lines: DraftLine[];
   if (offer) {
@@ -129,20 +134,13 @@ export async function buildInvoiceDraft(
     if (invoiced) warnings.push(`${sourceLabel} already has an invoice: ${str(invoiced.count_code) ?? str(invoiced.mk_id)}.`);
   } else {
     if (!input.lines?.length) throw new DraftError("An invoice needs at least one product line, or from_offer / from_order.");
-    const fallback = foreignInvoice ? await zeroTax(catalog, partnerInvoices) : undefined;
-    lines = input.lines.map((line, i) => productLine(catalog, line, i, fallback));
+    // Foreign partners: no VAT by default (reverse charge, export); a line's vat_percent charges VAT.
+    const foreignTax = partner.foreign ? (await zeroTax(catalog, partnerInvoices)) ?? "unknown" : undefined;
+    lines = input.lines.map((line, i) => productLine(catalog, line, i, { foreignTax, currency }));
   }
-  if (foreignInvoice) {
-    lines.forEach((l, i) => {
-      if (l.taxRatePercent !== 0) {
-        throw new DraftError(
-          `Line ${i + 1}: ${l.name} has ${l.taxRatePercent} % VAT (${l.taxCode}). Foreign invoices here only take lines without VAT ` +
-            "(e.g. reverse charge); create an invoice with VAT in Metakocka.",
-        );
-      }
-    });
-  }
-  const totals = totalsOf(lines);
+  warnings.push(...foreignVatWarnings(partner, lines));
+  const totals = totalsOf(lines, currency);
+  const withoutVat = lines.every((l) => l.taxRatePercent === 0);
 
   // Service period.
   for (const [name, value] of [["service_from", input.service_from], ["service_to", input.service_to], ["due_date", input.due_date]] as const) {
@@ -176,11 +174,11 @@ export async function buildInvoiceDraft(
 
   // Note: given, or on a foreign invoice the VAT note of the partner's last foreign invoice.
   let note = input.note?.trim() || undefined;
-  if (input.note === undefined && foreignInvoice) {
+  if (input.note === undefined && partner.foreign && withoutVat) {
     const last = (await partnerInvoices()).find((d) => str(d.notes)?.trim());
     if (!last) {
       throw new DraftError(
-        `A foreign invoice needs the VAT note (e.g. reverse charge), and ${partner.name} has no earlier foreign invoice to take it from. ` +
+        `An invoice without VAT to a foreign partner needs the VAT note (e.g. reverse charge), and ${partner.name} has no earlier foreign invoice to take it from. ` +
           'Ask the user for the note and pass it as note (or note "" for none).',
       );
     }
@@ -195,7 +193,7 @@ export async function buildInvoiceDraft(
     service_to_date: toMkDate(serviceTo),
     duo_payment: toMkDate(dueDate),
     partner: { mk_id: partner.id, mk_address_id: address.id },
-    currency_code: "EUR",
+    currency_code: currency,
     ...(input.title ? { title: input.title } : {}),
     ...(note ? { notes: note } : {}),
     ...(offer ? { [input.from_offer ? "offer_list" : "sales_order_list"]: [{ count_code: str(offer.count_code) }] } : {}),
@@ -234,9 +232,7 @@ async function loadSource(ctx: BuildContext, docType: "sales_offer" | "sales_ord
   const what = docType === "sales_offer" ? "offer" : "sales order";
   const id = await findDocumentIdByNumber(ctx.client, docType, number);
   if (!id) throw new DraftError(`No ${what} ${number} in Metakocka. Find it with search_documents (doc_type ${docType}) and use its number.`);
-  const doc = await getDocument(ctx.client, docType, id);
-  if ((str(doc.currency_code) ?? "EUR") !== "EUR") throw new DraftError(`The ${what} ${number} is in ${str(doc.currency_code)}; only EUR is supported.`);
-  return doc;
+  return getDocument(ctx.client, docType, id);
 }
 
 /** The offer's (or order's) lines as they are on it: product, quantity, price, discount and tax code. `number` names it, e.g. "Offer 4/2026". */

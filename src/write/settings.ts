@@ -11,7 +11,8 @@ export const WRITABLE_TYPES = {
   offers: ["sales_offer"],
   /** Invoices, prepayment invoices (avansni računi) and an invoice's status. */
   invoices: ["sales_bill_domestic", "sales_bill_foreign", "sales_bill_prepaid", "invoice_update"],
-  credit_notes: ["sales_bill_credit_note"],
+  /** Credit notes we issue and the ones suppliers send (prejeti dobropis). */
+  credit_notes: ["sales_bill_credit_note", "purchase_bill_credit_note"],
   purchase_invoices: ["purchase_bill_domestic", "purchase_bill_foreign"],
   purchase_orders: ["purchase_order"],
   /** Sales orders, invoices from them, and changes to an order (status, tracking code, shipping, invoicing it). */

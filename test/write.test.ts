@@ -278,7 +278,6 @@ describe("draft_document", () => {
       return String(body);
     };
     expect(await err({ partner_id: "999" })).toMatch(/No partner with id 999.*never creates partners/);
-    expect(await err({ partner_id: "FOREIGN" })).toMatch(/foreign partner/);
     expect(await err({ partner_id: "DISC" })).toMatch(/partner discounts/);
     expect(await err({ partner_id: "TWO" })).toMatch(/several addresses.*A1: .*Prva 1.*A2: .*Druga 2/);
     expect(await err({ partner_id: "NONE" })).toMatch(/no address/);
@@ -590,6 +589,7 @@ describe("invoices", () => {
     customer: "Codeer Limited",
     tax_id_number: "CY10383869C",
     foreign_county: "true",
+    taxpayer: "true",
     partner_delivery_address_list: [{ mk_id: "400075425335", street: "Theodorou Kolokotroni 3", post_number: "8300", city: "Konia", country: "Cyprus" }],
   });
   const FOREIGN = { doc_type: "sales_bill_foreign", partner_id: "400066072082", lines: [{ code: "SUPPORT", quantity: 10 }] };
@@ -658,7 +658,7 @@ describe("invoices", () => {
     expect(given.summary).toMatch(/storitev 2026-09-01 – 2026-09-30 · rok plačila 2026-10-13$/);
   });
 
-  it("foreign invoices: only for foreign partners, only lines without VAT, with the VAT note of the last foreign invoice", async () => {
+  it("foreign invoices: only for foreign partners, without VAT unless a line asks for it, with the VAT note of the last foreign invoice", async () => {
     const note = "VAT is not calculated in accordance with Article 25 ZDDV-1. Reverse charge.";
     const fake = metakocka({
       partners: [partner(), FOREIGN_PARTNER],
@@ -668,7 +668,13 @@ describe("invoices", () => {
 
     expect(parse((await draft(client, { ...FOREIGN, doc_type: "sales_bill_domestic" })).result)).toMatch(/Codeer Limited is a foreign partner: use doc_type sales_bill_foreign/);
     expect(parse((await draft(client, { ...DOMESTIC, doc_type: "sales_bill_foreign" })).result)).toMatch(/domestic partner: use doc_type sales_bill_domestic/);
-    expect(parse((await draft(client, { ...FOREIGN, lines: [{ product_id: "P1", quantity: 1 }] })).result)).toMatch(/Svetovanje has 22 % VAT/);
+    // Without vat_percent a foreign partner's line takes the 0 % code; with it, VAT is charged and questioned for a business.
+    const { body: zero } = await draft(client, { ...FOREIGN, lines: [{ product_id: "P1", quantity: 1 }] });
+    expect(zero.lines[0]).toMatchObject({ vat_percent: 0, total: 35 });
+    const { body: vat } = await draft(client, { ...FOREIGN, lines: [{ product_id: "P1", quantity: 1, vat_percent: 22 }], note: "" });
+    expect(vat.lines[0]).toMatchObject({ vat_percent: 22, total: 42.7 });
+    expect(vat.warnings[0]).toMatch(/VAT-registered foreign business, yet 1 line\(s\) charge VAT/);
+    expect(parse((await draft(client, { ...FOREIGN, lines: [{ product_id: "P1", quantity: 1, vat_percent: 5 }] })).result)).toMatch(/no price list uses a tax code with 5 % VAT/);
 
     const { body } = await draft(client, FOREIGN);
     expect(body).toMatchObject({ due_date: "2026-10-19", totals: { net: 350, tax: 0, gross: 350 } });
@@ -1593,5 +1599,111 @@ describe("shipping, complaints and messages", () => {
     const second = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: lost.draft_id } }));
     expect(second.status).toBe("unknown");
     expect(f.calls.filter((c) => c.endpoint === "../send_message")).toHaveLength(3);
+  });
+});
+
+describe("foreign partners and other currencies", () => {
+  const ALL: WriteSettings = {
+    docTypes: ["sales_offer", "sales_order", "sales_bill_domestic", "sales_bill_foreign", "sales_bill_prepaid", "sales_bill_credit_note", "purchase_bill_credit_note", "payment"],
+    confirm: "never",
+    timeoutMs: 120_000,
+  };
+  const GMBH = partner({
+    mk_id: "DE1",
+    customer: "Kunde GmbH",
+    tax_id_number: "DE123456789",
+    foreign_county: "true",
+    taxpayer: "true",
+    partner_delivery_address_list: [{ mk_id: "DEA", street: "Hauptstraße 1", post_number: "10115", city: "Berlin", country: "Germany", payment_due_days: "14" }],
+  });
+  const PERSON = partner({ mk_id: "AT1", customer: "Hans Huber", tax_id_number: "", foreign_county: "true", taxpayer: "false", partner_delivery_address_list: [{ mk_id: "ATA", street: "Ring 1", post_number: "1010", city: "Wien", country: "Austria", payment_due_days: "0" }] });
+
+  it("offers and orders to foreign partners: no VAT by default, VAT when a line asks for it", async () => {
+    const f = metakocka({ partners: [GMBH, PERSON] });
+    const { client } = await connect(f, { write: quiet(ALL) });
+    const { body: offer } = await draft(client, { doc_type: "sales_offer", partner_id: "DE1", lines: [{ product_id: "P1", quantity: 2 }] });
+    expect(offer.lines[0]).toMatchObject({ vat_percent: 0, total: 70 });
+    expect(offer.warnings ?? []).toEqual([]);
+    const { body: order } = await draft(client, { doc_type: "sales_order", partner_id: "AT1", lines: [{ product_id: "P1", quantity: 1 }] });
+    expect(order.warnings[0]).toMatch(/Hans Huber is a foreign private person/);
+    const { body: withVat } = await draft(client, { doc_type: "sales_order", partner_id: "AT1", lines: [{ product_id: "P1", quantity: 1, vat_percent: 22 }] });
+    expect(withVat.lines[0]).toMatchObject({ vat_percent: 22, total: 42.7 });
+    expect(withVat.warnings ?? []).toEqual([]);
+  });
+
+  it("documents in another currency need every price, and show and send that currency", async () => {
+    const f = metakocka({ partners: [GMBH] });
+    const { client } = await connect(f, { write: quiet(ALL) });
+    expect(parse((await draft(client, { doc_type: "sales_offer", partner_id: "DE1", currency: "usd", lines: [{ product_id: "P1", quantity: 1 }] })).result)).toMatch(/give the price of Svetovanje in USD/);
+    expect(parse((await draft(client, { doc_type: "sales_offer", partner_id: "DE1", currency: "us1", lines: [{ product_id: "P1", quantity: 1, price: 1 }] })).result)).toMatch(/is not an ISO code/);
+    const { body } = await draft(client, { doc_type: "sales_bill_foreign", partner_id: "DE1", currency: "USD", note: "Reverse charge.", lines: [{ product_id: "P1", quantity: 2, price: 40 }] });
+    expect(body.totals).toEqual({ net: 80, tax: 0, gross: 80, currency: "USD" });
+    expect(body.summary).toMatch(/2 × Svetovanje à 40,00 USD = 80,00 USD/);
+    await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } });
+    expect(f.puts()[0]!.body).toMatchObject({ doc_type: "sales_bill_foreign", currency_code: "USD", product_list: [expect.objectContaining({ price: "40", tax: "000" })] });
+  });
+
+  it("an invoice from an offer in another currency takes that currency", async () => {
+    const offer = { mk_id: "OFU", doc_type: "sales_offer", count_code: "8/2026", currency_code: "GBP", partner: { mk_id: "DE1", mk_address_id: "DEA" }, product_list: [{ mk_id: "P1", amount: "1", price: "30", tax: "000" }] };
+    const f = metakocka({
+      partners: [GMBH],
+      documents: { OFU: offer },
+      search: (body) => (body.doc_type === "sales_offer" ? { opr_code: "0", result: [offer] } : { opr_code: "0", result: [{ partner: { mk_id: "DE1" }, count_code: "5/2026", notes: "Reverse charge." }] }),
+    });
+    const { client } = await connect(f, { write: quiet(ALL) });
+    expect(parse((await draft(client, { doc_type: "sales_bill_foreign", from_offer: "8/2026", currency: "EUR" })).result)).toMatch(/is in GBP; the invoice takes its currency/);
+    const { body } = await draft(client, { doc_type: "sales_bill_foreign", from_offer: "8/2026" });
+    expect(body.totals).toMatchObject({ gross: 30, currency: "GBP" });
+  });
+
+  it("payments are in the document's currency", async () => {
+    const f = metakocka({
+      search: () => ({ opr_code: "0", result: [{ mk_id: "INVU", count_code: "3/2026" }] }),
+      handlers: { get_document: () => ({ opr_code: "0", mk_id: "INVU", count_code: "3/2026", currency_code: "USD", partner: { customer: "Codeer" }, sum_all: "100", sum_paid: "0", mark_paid: [{ payment_type: "Transakcijski račun" }] }) },
+    });
+    const { client } = await connect(f, { write: quiet(ALL) });
+    const body = parse(await client.callTool({ name: "draft_payment", arguments: { doc_type: "sales_bill_foreign", number: "3/2026" } }));
+    expect(body.summary).toMatch(/^Zabeleži PLAČILO 100,00 USD na 3\/2026/);
+  });
+
+  it("enters a supplier's credit note as printed, checked against its total and never twice", async () => {
+    const supplierInvoice = {
+      mk_id: "PB1",
+      doc_type: "purchase_bill_domestic",
+      count_code: "126-0399",
+      currency_code: "EUR",
+      partner: { mk_id: "400068941553", mk_address_id: "400079138037", customer: "ACME d.o.o." },
+      product_list: [{ mk_id: "P7", code: "DOM", amount: "1", price: "31.95", tax: "EX4" }],
+      sum_all: "38.98",
+    };
+    let entered: Record<string, unknown>[] = [];
+    const f = metakocka({
+      documents: { PB1: supplierInvoice },
+      search: (body) =>
+        body.doc_type === "purchase_bill_domestic" && body.query === "126-0399"
+          ? { opr_code: "0", result: [supplierInvoice] }
+          : body.doc_type === "purchase_bill_credit_note"
+            ? { opr_code: "0", result_all_records: String(entered.length), result: entered }
+            : { opr_code: "0", result: [] },
+    });
+    const { client } = await connect(f, { write: quiet(ALL) });
+    const call = async (args: Record<string, unknown>) => parse(await client.callTool({ name: "draft_credit_note", arguments: { side: "purchase", ...args } }));
+    expect(await call({ credit_type: "goods", from_invoice: "126-0399" })).toMatch(/Give supplier_number/);
+    expect(await call({ credit_type: "goods", from_invoice: "126-0399", supplier_number: "CN-5", credit_note_total: 10 })).toMatch(/add up to 38\.98 with VAT, but credit_note_total is 10\.00/);
+    const body = await call({ credit_type: "goods", from_invoice: "126-0399", supplier_number: "CN-5", credit_note_date: "2026-10-02", credit_note_total: -38.98 });
+    expect(body.summary).toMatch(/^Vnesi PREJETI DOBROPIS CN-5 — vračilo blaga — od ACME d\.o\.o\. \(SI12345678\)\n.*\nK računu: 126-0399\n/);
+    await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } });
+    expect(f.puts()[0]!.body).toMatchObject({
+      doc_type: "purchase_bill_credit_note",
+      count_code: "CN-5",
+      doc_date: "02.10.2026",
+      receive_date: "05.10.2026",
+      credit_note_type: "goods",
+      credit_note_bill: "126-0399",
+      product_list: [expect.objectContaining({ mk_id: "P7", amount: "1", price: "31.95" })],
+    });
+    entered = [{ count_code: "CN-5", partner: { mk_id: "400068941553" } }];
+    expect(await call({ credit_type: "goods", from_invoice: "126-0399", supplier_number: "cn-5" })).toMatch(/already in Metakocka/);
+    expect(parse(await client.callTool({ name: "draft_credit_note", arguments: { credit_type: "goods", from_invoice: "126-0399", supplier_number: "X" } }))).toMatch(/only for side purchase/);
   });
 });

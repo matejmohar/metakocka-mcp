@@ -14,7 +14,9 @@ import { asArray, num, str } from "../util.js";
 import { cachedWarehouses, resolveWarehouse, type ToolContext } from "../tools/shared.js";
 import { loadCatalog, type CatalogProduct } from "./catalog.js";
 import {
+  catalogZeroTax,
   CHANGE_LOG_PREFIX,
+  currencyCode,
   DraftError,
   linesAndTotals,
   oneLine,
@@ -61,6 +63,8 @@ export interface StockDocInput {
   start_date?: string;
   title?: string;
   note?: string;
+  /** ISO currency (default EUR, or the source document's). */
+  currency?: string;
   language?: "sl" | "en";
 }
 
@@ -88,11 +92,11 @@ const NAMES: Record<StockDocType, [string, string]> = {
 
 /** Fields each document type takes besides partner, lines and note. */
 export const STOCK_FIELDS: Record<StockDocType, readonly (keyof StockDocInput)[]> = {
-  purchase_order: ["partner_id", "address_id", "lines", "warehouse", "delivery_date", "title", "note"],
-  warehouse_packing_list: ["partner_id", "address_id", "lines", "warehouse", "from_order", "title", "note"],
-  warehouse_delivery_note: ["partner_id", "address_id", "lines", "warehouse", "from_order", "title", "note"],
-  warehouse_receiving_note: ["partner_id", "address_id", "lines", "warehouse", "from_purchase_order", "title", "note"],
-  warehouse_acceptance_note: ["partner_id", "address_id", "lines", "warehouse", "from_purchase_order", "supplier_document", "title", "note"],
+  purchase_order: ["partner_id", "address_id", "lines", "warehouse", "delivery_date", "title", "note", "currency"],
+  warehouse_packing_list: ["partner_id", "address_id", "lines", "warehouse", "from_order", "title", "note", "currency"],
+  warehouse_delivery_note: ["partner_id", "address_id", "lines", "warehouse", "from_order", "title", "note", "currency"],
+  warehouse_receiving_note: ["partner_id", "address_id", "lines", "warehouse", "from_purchase_order", "title", "note", "currency"],
+  warehouse_acceptance_note: ["partner_id", "address_id", "lines", "warehouse", "from_purchase_order", "supplier_document", "title", "note", "currency"],
   transfer_order: ["lines", "warehouse", "to_warehouse", "confirm"],
   workorder: ["partner_id", "from_order", "start_date", "delivery_date", "title", "note"],
 };
@@ -136,6 +140,7 @@ export async function buildStockDocDraft(ctx: BuildContext & { tool: ToolContext
     else if (type !== "purchase_order") throw new DraftError(`Give the warehouse: ${warehouses.map((w) => str(w.name)).join(", ")}.`);
   }
 
+  const currency = source ? str(source.currency_code) ?? "EUR" : currencyCode(input.currency);
   const catalog = await loadCatalog(ctx.client, ctx.cache, ctx.today);
   let lines: DraftLine[] = [];
   if (type === "workorder") {
@@ -157,8 +162,7 @@ export async function buildStockDocDraft(ctx: BuildContext & { tool: ToolContext
       });
     } else {
       lines = input.lines.map((l, i) => {
-        if (l.vat_percent !== undefined) throw new DraftError(`Line ${i + 1}: vat_percent is only for purchase and incoming documents; the tax comes from the price list.`);
-        return productLine(catalog, l, i);
+        return productLine(catalog, { ...l }, i, { currency, foreignTax: partner.foreign && l.vat_percent === undefined ? catalogZeroTax(catalog) ?? "unknown" : undefined });
       });
     }
   }
@@ -170,7 +174,7 @@ export async function buildStockDocDraft(ctx: BuildContext & { tool: ToolContext
         : `Saving it puts the goods into stock in ${str(warehouse?.name) ?? "the warehouse"}.`,
     );
   }
-  const totals = totalsOf(lines);
+  const totals = totalsOf(lines, currency);
   const links = source
     ? sourceType === "sales_order"
       ? { sales_order_list: [{ count_code: str(source.count_code) }] }
@@ -197,7 +201,7 @@ export async function buildStockDocDraft(ctx: BuildContext & { tool: ToolContext
       doc_type: type,
       doc_date: toMkDate(ctx.today),
       partner: { mk_id: partner.id, mk_address_id: address.id },
-      currency_code: "EUR",
+      currency_code: currency,
       ...(warehouse ? { [type === "purchase_order" ? "warehouse_delivery" : "warehouse"]: str(warehouse.mark) ?? str(warehouse.name) } : {}),
       ...(input.title ? { title: input.title } : {}),
       ...(input.note ? { notes: input.note } : {}),

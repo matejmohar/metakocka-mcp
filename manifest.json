@@ -336,7 +336,7 @@
     "allow_credit_notes": {
       "type": "boolean",
       "title": "Allow creating credit notes",
-      "description": "Let Claude create credit notes (dobropisi) to invoices: returned goods or a financial correction, never more than the invoice. Saved not issued. Off by default.",
+      "description": "Let Claude create credit notes (dobropisi) to invoices — returned goods or a financial correction, never more than the invoice, saved not issued — and enter suppliers' credit notes. Off by default.",
       "required": false,
       "default": false
     },

@@ -8,8 +8,11 @@ import type { MkRecord } from "../api.js";
 import { isIsoDate, toMkDate } from "../dates.js";
 import { loadCatalog } from "./catalog.js";
 import {
+  catalogZeroTax,
   CHANGE_LOG_PREFIX,
+  currencyCode,
   DraftError,
+  foreignVatWarnings,
   duplicateWarning,
   linesAndTotals,
   oneLine,
@@ -30,6 +33,8 @@ export interface OfferInput {
   title?: string;
   note?: string;
   valid_days?: number;
+  /** ISO currency (default EUR); other currencies need every price given. */
+  currency?: string;
   language?: "sl" | "en";
 }
 
@@ -58,13 +63,17 @@ async function buildSalesDraft(
 ): Promise<{ draft: Draft; warnings: string[] }> {
   const offer = docType === "sales_offer";
   const warnings: string[] = [];
-  const partner = await resolvePartner(ctx.client, input.partner_id, { foreign: "refuse", what: offer ? "Offers" : "Sales orders" });
+  const partner = await resolvePartner(ctx.client, input.partner_id, { foreign: "allow", what: offer ? "Offers" : "Sales orders" });
   const address = resolveAddress(partner, input.address_id);
+  const currency = currencyCode(input.currency);
 
   const catalog = await loadCatalog(ctx.client, ctx.cache, ctx.today);
   if (!input.lines.length) throw new DraftError(`${offer ? "An offer" : "A sales order"} needs at least one product line.`);
-  const lines = input.lines.map((line, i) => productLine(catalog, line, i));
-  const totals = totalsOf(lines);
+  // Foreign partners: no VAT by default (reverse charge, export); a line's vat_percent charges VAT.
+  const foreignTax = partner.foreign ? catalogZeroTax(catalog) ?? "unknown" : undefined;
+  const lines = input.lines.map((line, i) => productLine(catalog, line, i, { foreignTax, currency }));
+  warnings.push(...foreignVatWarnings(partner, lines));
+  const totals = totalsOf(lines, currency);
 
   const validDays = offer ? input.valid_days ?? 30 : undefined;
   const buyerOrder = input.buyer_order?.trim() || undefined;
@@ -72,7 +81,7 @@ async function buildSalesDraft(
     doc_type: docType,
     doc_date: toMkDate(ctx.today),
     partner: { mk_id: partner.id, mk_address_id: address.id },
-    currency_code: "EUR",
+    currency_code: currency,
     ...(validDays !== undefined ? { valid_days: String(validDays) } : {}),
     ...(input.title ? { title: input.title } : {}),
     ...(input.note ? { notes: input.note } : {}),

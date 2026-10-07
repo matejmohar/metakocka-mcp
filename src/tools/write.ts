@@ -182,11 +182,18 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
                   "Net unit price in EUR; default: the product's price list." + (purchases ? " Purchase invoices: as on the invoice, required; negative for a credit line." : ""),
                 ),
               discount_percent: z.number().min(0).max(100).optional(),
+              vat_percent: z
+                .number()
+                .min(0)
+                .max(100)
+                .optional()
+                .describe(
+                  "VAT rate of the line. Sales documents: default the price list's, and 0 (reverse charge, export) for foreign partners; " +
+                    "give it to charge another rate." +
+                    (purchases ? " Purchase invoices: required, as on the invoice (e.g. 22, 9.5, 0)." : ""),
+                ),
               ...(purchases
-                ? {
-                    vat_percent: z.number().min(0).max(100).optional().describe("Purchase invoices: the line's VAT rate as on the invoice (e.g. 22, 9.5, 0)."),
-                    description: z.string().max(200).optional().describe("Purchase invoices: the line's text on the invoice (e.g. a period or domain)."),
-                  }
+                ? { description: z.string().max(200).optional().describe("Purchase invoices: the line's text on the invoice (e.g. a period or domain).") }
                 : {}),
             }),
           )
@@ -221,6 +228,7 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
               attachment_path: z.string().optional().describe("Purchase invoices: absolute path of the supplier's invoice file (PDF), attached once saved."),
             }
           : {}),
+        currency: z.string().length(3).optional().describe("ISO currency, e.g. USD, GBP; default EUR (or the offer's / order's). Price lists are in EUR, so other currencies need every price."),
         language: z.enum(["sl", "en"]).default("sl").describe("Language of the summary the user confirms."),
       }),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -257,7 +265,7 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           attachment_path: ["purchase"],
         };
         const misplaced = Object.keys(allowed).filter((k) => a[k] !== undefined && !allowed[k]!.includes(kind));
-        if (kind !== "purchase" && a.lines?.some((l) => l.vat_percent !== undefined || l.description !== undefined)) misplaced.push("lines[].vat_percent / description");
+        if (kind !== "purchase" && a.lines?.some((l) => l.description !== undefined)) misplaced.push("lines[].description");
         if (misplaced.length) throw new DraftError(`${misplaced.join(", ")}: not for ${a.doc_type}.`);
 
         let built: { draft: Draft; warnings: string[]; info?: InvoiceInfo | PurchaseInfo };
@@ -384,7 +392,7 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           doc_type: z.enum(PAYABLE_TYPES).describe("Type of the paid document, e.g. sales_bill_domestic (izdani račun), purchase_bill_domestic (prejeti račun)."),
           number: z.string().min(1).optional().describe("Document number as shown in Metakocka, e.g. \"RD-2/2026\"."),
           id: z.string().min(1).optional().describe("Or the document's Metakocka id."),
-          amount: z.number().positive().max(100_000_000).optional().describe("Amount in EUR; default: everything still open (for a refund: everything paid)."),
+          amount: z.number().positive().max(100_000_000).optional().describe("Amount in the document's currency; default: everything still open (for a refund: everything paid)."),
           date: z.string().optional().describe("When it was paid, YYYY-MM-DD; default today."),
           mode: z.enum(["payment", "prepayment", "return"]).default("payment").describe("payment (plačilo), prepayment (avans, on offers and orders) or return (vračilo)."),
           payment_type: z.string().max(100).optional().describe('As in Metakocka, e.g. "Transakcijski račun", "Gotovina", "Kartica"; default: the usual one.'),
@@ -462,13 +470,20 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
       {
         title: "Draft a credit note",
         description:
-          "Prepare a credit note (dobropis) WITHOUT saving it: goods = returned goods, credited at the invoice's prices (all " +
-          "its lines, or the ones given with smaller quantities); financial = a discount or correction afterwards, on service " +
-          "products; standalone = not linked to an invoice. Saved not issued; it can't credit more than its invoice. Returns a " +
-          "draft_id and a summary: show it, then commit_document.",
+          "Prepare a credit note WITHOUT saving it: one we issue (dobropis, side sales) or one a supplier sent (prejeti " +
+          "dobropis, side purchase: copied from their document with supplier_number, credit_note_date, credit_note_total and " +
+          "every line's price and vat_percent). goods = returned goods, credited at the invoice's prices (all its lines, or " +
+          "the ones given with smaller quantities); financial = a discount or correction afterwards, on service products; " +
+          "standalone = not linked to an invoice. Our credit notes are saved not issued; none can credit more than its " +
+          "invoice. Returns a draft_id and a summary: show it, then commit_document.",
         inputSchema: z.object({
+          side: z.enum(["sales", "purchase"]).default("sales").describe("sales: we credit a customer; purchase: a supplier's credit note to us."),
           credit_type: z.enum(["goods", "financial", "standalone"]),
-          from_invoice: z.string().min(1).optional().describe("goods / financial: number of the sales invoice it credits."),
+          from_invoice: z.string().min(1).optional().describe("goods / financial: number of the invoice it credits (for purchase: the supplier's invoice number, as entered)."),
+          supplier_number: z.string().max(100).optional().describe("Purchase: the number printed on the supplier's credit note."),
+          credit_note_date: z.string().optional().describe("Purchase: the date on it (YYYY-MM-DD), default today."),
+          credit_note_total: z.number().optional().describe("Purchase: its total with VAT as printed, checked against the lines."),
+          currency: z.string().length(3).optional().describe("Standalone: ISO currency, default EUR; linked credit notes take the invoice's."),
           partner_id: z.string().min(1).optional().describe("standalone: the partner's id."),
           address_id: z.string().optional(),
           lines: z
@@ -477,8 +492,9 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
                 product_id: z.string().optional(),
                 code: z.string().optional(),
                 quantity: z.number().positive().optional(),
-                price: z.number().min(0).optional().describe("financial / standalone: net unit price; default the price list."),
+                price: z.number().min(0).optional().describe("financial / standalone: net unit price; default the price list (purchase: required)."),
                 discount_percent: z.number().min(0).max(100).optional(),
+                vat_percent: z.number().min(0).max(100).optional().describe("VAT rate; default the price list's (0 for foreign partners); purchase: required."),
               }),
             )
             .max(50)
@@ -537,6 +553,7 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           from_order: z.string().optional().describe("Packing lists, delivery orders, work orders: the sales order's number."),
           from_purchase_order: z.string().optional().describe("Goods received notes, receiving orders: the purchase order's number."),
           supplier_document: z.string().max(50).optional().describe("Goods received notes: the supplier's delivery note number."),
+          currency: z.string().length(3).optional().describe("ISO currency, default EUR (or the source document's); other currencies need every price."),
           delivery_date: z.string().optional().describe("Purchase orders: expected delivery; work orders: deadline (YYYY-MM-DD)."),
           start_date: z.string().optional().describe("Work orders: start (YYYY-MM-DD), default today."),
           title: z.string().max(100).optional(),

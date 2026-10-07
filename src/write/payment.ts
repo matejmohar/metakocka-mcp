@@ -34,7 +34,7 @@ export interface PaymentInput {
   number?: string;
   /** Or its Metakocka id. */
   id?: string;
-  /** Default: everything still open (for a refund: everything paid). */
+  /** In the document's currency. Default: everything still open (for a refund: everything paid). */
   amount?: number;
   /** Default: today. */
   date?: string;
@@ -56,8 +56,8 @@ export async function buildPaymentDraft(ctx: BuildContext, input: PaymentInput):
   if (!id) throw new DraftError(`No ${input.doc_type} with number ${input.number} in Metakocka. Find it with search_documents.`);
   const doc = await readWithPayments(ctx.client, input.doc_type, id);
   const number = str(doc.count_code) ?? input.number;
+  // A payment is in the document's currency.
   const currency = str(doc.currency_code) ?? "EUR";
-  if (currency !== "EUR") throw new DraftError(`${number} is in ${currency}; only payments in EUR are supported.`);
 
   const total = Math.abs(num(doc.sum_all) ?? Number.NaN);
   if (!Number.isFinite(total)) throw new DraftError(`${number} has no total in Metakocka.`);
@@ -127,7 +127,7 @@ export async function buildPaymentDraft(ctx: BuildContext, input: PaymentInput):
   });
 
   const sl = language === "sl";
-  const m = (n: number) => money(n, language);
+  const m = (n: number) => money(n, language, currency);
   const head = {
     payment: sl ? (isPurchase(input.doc_type) ? "Zabeleži PLAČILO dobavitelju" : "Zabeleži PLAČILO") : isPurchase(input.doc_type) ? "Record a PAYMENT to the supplier" : "Record a PAYMENT",
     prepayment: sl ? "Zabeleži AVANS" : "Record a PREPAYMENT",
