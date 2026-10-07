@@ -28,9 +28,9 @@ jobs:
           else
             echo "::notice::Skipped: add the METAKOCKA_COMPANY_ID and METAKOCKA_SECRET_KEY repository secrets to enable this check."
           fi
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: steps.creds.outputs.ok == 'true'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: steps.creds.outputs.ok == 'true'
         with:
           node-version: 22

@@ -130,7 +130,7 @@ Treat the secret key like a password: anyone who has it can read your company's 
 
 ### 2. Add the server to your AI assistant
 
-You need [Node.js](https://nodejs.org) 20 or newer.
+You need [Node.js](https://nodejs.org) 22 or newer.
 
 **Claude Desktop** — Settings → Developer → Edit Config, and add:
 
