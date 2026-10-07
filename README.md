@@ -46,7 +46,7 @@ vir `metakocka://document-types` pa vsebuje tudi vsakdanje izraze. Vsi pozivi (n
 | **Documents** | |
 | `search_documents` | Find offers, sales orders, invoices, purchase and warehouse documents, work orders. Filter by date, partner tax number, status, unpaid, products. |
 | `get_document` | One document in full (line items, totals, payments, linked documents), by id or by its number, e.g. `PP-18495`. Also complaints (reklamacije). |
-| `get_document_pdf` | Save an invoice (or any document, given its print-out's report id) as PDF on your computer, as Metakocka prints it. |
+| `get_document_pdf` | Save an invoice (or any document, given its print-out's report id) as PDF on your computer, as Metakocka prints it, or get a download link valid for a day. Long print-outs are printed in the background. |
 | `find_by_tracking_code` | The sales order behind a parcel tracking code, return tracking code or sticker number. |
 | `list_search_filters` | Which advanced Metakocka search filters exist for a document type. |
 | **Products and stock** | |
@@ -57,6 +57,12 @@ vir `metakocka://document-types` pa vsebuje tudi vsakdanje izraze. Vsi pozivi (n
 | `stock_movements` | One product's stock history (goods received, shipped, sold over the counter, transferred) for a period. |
 | `stock_valuation` | Estimated stock value per warehouse at last purchase prices, and the most valuable products. |
 | `list_warehouses` | All warehouses. |
+| `get_external_stock` | Stock kept in an external ERP (Navision, Vasco), less today's invoices and credit notes in Metakocka. |
+| **Web-shop orders** | |
+| `get_messages` | SMS, Viber and WhatsApp threads with customers, for one order or every thread with a reply since a date. |
+| `get_proof_of_delivery` | The delivery service's proof of delivery for an order's parcel, saved as a file. |
+| `get_delivery_prices` | Delivery price lists per delivery type and package weight. |
+| `check_blacklist` | Whether a customer is on the company's blacklist (črna lista), by e-mail, phone or name. |
 | **Partners** | |
 | `search_partners` | Customers and suppliers by name, tax number, e-mail or phone. |
 | `get_partner` | One partner in full, with what they owe us and what we owe them (open, overdue, aging). |
@@ -170,7 +176,8 @@ newer version exists.
 | `NODE_EXTRA_CA_CERTS` | no | CA certificate (PEM file) for an installation with a company or self-signed certificate |
 | `METAKOCKA_TIMEOUT_MS` | no | `30000` (or `METAKOCKA_TIMEOUT_SECONDS`) |
 | `METAKOCKA_CACHE_SECONDS` | no | `300` — how long warehouses and partner lookups are reused; `0` turns caching off |
-| `METAKOCKA_PDF_DIR` | no | `Downloads/Metakocka` — where `get_document_pdf` and `accounting_export` save files |
+| `METAKOCKA_PDF_DIR` | no | `Downloads/Metakocka` — where `get_document_pdf`, `get_proof_of_delivery` and `accounting_export` save files |
+| `METAKOCKA_USER_EMAIL` | no | E-mail of a Metakocka user, which `check_blacklist` sends when Metakocka asks who is searching |
 | `METAKOCKA_WRITE` | no | off — comma-separated `offers`, `orders`, `invoices`, `purchase_invoices`, `partners`, `products`, `payments`, see [Creating documents](#creating-documents) |
 | `METAKOCKA_WRITE_CONFIRM` | no | `client` — you confirm each document in a prompt, or by approving the save in your client; `elicitation` — prompts only; `never` — no confirmation |
 | `METAKOCKA_WRITE_TIMEOUT_SECONDS` | no | `120` — how long to wait for Metakocka to save a document |

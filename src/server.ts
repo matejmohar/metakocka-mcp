@@ -8,6 +8,7 @@ import { registerResources } from "./resources.js";
 import { registerBankTools } from "./tools/bank.js";
 import { registerCatalogTools } from "./tools/catalog.js";
 import { registerDocumentTools } from "./tools/documents.js";
+import { registerOrderTools } from "./tools/orders.js";
 import { registerPartnerTools } from "./tools/partners.js";
 import { registerReportTools } from "./tools/reports.js";
 import type { ToolContext } from "./tools/shared.js";
@@ -46,13 +47,18 @@ export interface CreateServerOptions {
   write?: WriteContext;
   /** Downloads accounting exports from the link Metakocka returns; injected for tests. */
   fetchFile?: typeof fetch;
+  /** Waits between polls of asynchronous print-outs; injected for tests. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 const INSTRUCTIONS = [
   "Read-only access to one company's Metakocka ERP (Slovenian ERP / e-commerce back office).",
   "Documents: search_documents to find, get_document for full detail (also complaints / reklamacije: doc_type complaint), " +
-    "get_document_pdf to save an invoice as PDF, find_by_tracking_code for the order behind a parcel.",
-  "Products: search_products to find, get_product for full detail. Stock: get_stock, low_stock (what to reorder), " +
+    "get_document_pdf to save an invoice as PDF (or as_link for a download link), find_by_tracking_code for the order behind a parcel.",
+  "Web-shop orders: get_messages (SMS / Viber / WhatsApp with customers), get_proof_of_delivery, get_delivery_prices, " +
+    "check_blacklist (črna lista).",
+  "Products: search_products to find, get_product for full detail. Stock: get_stock (get_external_stock when it is kept " +
+    "in another ERP), low_stock (what to reorder), " +
     "stock_movements (one product's history), stock_valuation, list_warehouses.",
   "Partners: search_partners to find, get_partner for detail and open balance, partner_statement for their invoices, " +
     "credit notes and dated payments (and how late they pay).",
@@ -143,6 +149,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     pdfDir: options.pdfDir,
     pdfDelivery: options.pdfDelivery ?? "file",
     fetchFile: options.fetchFile,
+    sleep: options.sleep,
   };
   registerDocumentTools(server, ctx);
   registerCatalogTools(server, ctx);
@@ -150,6 +157,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
   registerPartnerTools(server, ctx);
   registerReportTools(server, ctx);
   registerBankTools(server, ctx);
+  registerOrderTools(server, ctx);
   if (options.write) registerWriteTools(server, ctx, options.write);
   registerResources(server, ctx);
   registerPrompts(server);

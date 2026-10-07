@@ -62,20 +62,25 @@ const WAREHOUSES = {
 };
 
 describe("MCP server", () => {
-  it("lists all tools; all read-only except the PDF and export tools, which only write a local file", async () => {
+  it("lists all tools; all read-only except the tools that only save a file on this computer", async () => {
     const { client } = await setup({});
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
       "accounting_export",
+      "check_blacklist",
       "find_by_tracking_code",
       "get_bank_balances",
       "get_bank_statements",
       "get_cash_register",
       "get_compensations",
+      "get_delivery_prices",
       "get_document",
       "get_document_pdf",
+      "get_external_stock",
+      "get_messages",
       "get_partner",
       "get_product",
+      "get_proof_of_delivery",
       "get_stock",
       "get_unpaid_invoices",
       "list_search_filters",
@@ -91,7 +96,7 @@ describe("MCP server", () => {
       "stock_valuation",
     ]);
     for (const tool of tools) {
-      expect(tool.annotations?.readOnlyHint, tool.name).toBe(tool.name !== "get_document_pdf" && tool.name !== "accounting_export");
+      expect(tool.annotations?.readOnlyHint, tool.name).toBe(!["get_document_pdf", "accounting_export", "get_proof_of_delivery"].includes(tool.name));
       expect(tool.annotations?.destructiveHint, tool.name).toBe(false);
       expect(tool.description, tool.name).toBeTruthy();
     }
@@ -1023,6 +1028,192 @@ describe("MCP server", () => {
     expect(result.isError).toBe(true);
     expect(text(result)).toMatch(/profile name is wrong/);
     expect(calls).toHaveLength(1); // never retried: a retry would queue a second export
+  });
+
+  it("get_messages reads every channel for an order and marks threads waiting for a reply", async () => {
+    const { client, calls } = await setup({
+      search: () => ({ opr_code: "0", result: [{ mk_id: "SO1", count_code: "PP-27771" }] }),
+      get_document: () => ({ opr_code: "0", mk_id: "SO1", count_code: "PP-27771" }),
+      "../get_message": (body) =>
+        body.type === "sms"
+          ? {
+              opr_code: "0",
+              message_list: [
+                {
+                  type: "sms",
+                  to_number: "+386 1234567891",
+                  doc_id: "SO1",
+                  doc_count_code: "PP-27771",
+                  message_list: [
+                    { message: "Paket je na poti", status: "ok", direction: "outbound", create_time: "2026-10-01T09:46:14+02:00" },
+                    { message: "Kdaj pride?", direction: "inbound", create_time: "2026-10-02T09:46:37+02:00", seen_time: "2026-10-02T14:30:30+02:00" },
+                  ],
+                },
+              ],
+            }
+          : { opr_code: "0" },
+    });
+    const data = json(await client.callTool({ name: "get_messages", arguments: { order_number: "PP-27771" } }));
+    const messageCalls = calls.filter((c) => c.endpoint === "../get_message");
+    expect(messageCalls.map((c) => c.body.type)).toEqual(["sms", "viber", "whatsapp"]);
+    expect(messageCalls[0]!.body).toMatchObject({ doc_type: "sales_order", doc_id: "SO1" });
+    expect(data).toMatchObject({
+      order: "PP-27771",
+      threads: 1,
+      awaiting_reply: 1,
+      message_threads: [{ type: "sms", customer_number: "+386 1234567891", order: "PP-27771", awaiting_reply: true, messages: [{ direction: "outbound" }, { direction: "inbound", text: "Kdaj pride?" }] }],
+    });
+  });
+
+  it("get_messages without an order asks for replies since the start of a day, always as +02:00", async () => {
+    const { client, calls } = await setup({ "../get_message": () => ({ opr_code: "0" }) });
+    const winter = json(await client.callTool({ name: "get_messages", arguments: { replies_since: "2026-01-15", types: ["sms"] } }));
+    expect(calls[0]!.body).toMatchObject({ type: "sms", return_new_inbound_messages_from: "2026-01-15T00:00:00+02:00" });
+    expect(winter).toMatchObject({ threads: 0, note: "No customer replies in this period." });
+    await client.callTool({ name: "get_messages", arguments: { types: ["viber"] } });
+    expect(calls[1]!.body).toMatchObject({ type: "viber", return_new_inbound_messages_from: "2026-09-28T00:00:00+02:00" });
+  });
+
+  it("get_proof_of_delivery reads the order's customer order number and tracking code and saves the file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mk-pod-"));
+    const { client, calls } = await setup(
+      {
+        search: () => ({ opr_code: "0", result: [{ mk_id: "SO1", count_code: "PP-5" }] }),
+        get_document: () => ({ opr_code: "0", mk_id: "SO1", count_code: "PP-5", buyer_order: "566_2026", tracking_code: "TC123" }),
+        "../get_proof_of_delivery": () => new Response(new Uint8Array([37, 80, 68, 70]), { status: 200, headers: { "Content-Type": "application/pdf" } }),
+      },
+      { pdfDir: dir },
+    );
+    const data = json(await client.callTool({ name: "get_proof_of_delivery", arguments: { order_number: "PP-5" } }));
+    expect(calls.at(-1)!.body).toMatchObject({ buyer_order: "566_2026", tracking_code: "TC123" });
+    expect(data).toMatchObject({ order: "PP-5", saved_to: join(dir, "proof_of_delivery_PP-5.pdf") });
+    expect([...(await readFile(data.saved_to))]).toEqual([37, 80, 68, 70]);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("get_proof_of_delivery explains an order that hasn't shipped yet", async () => {
+    const { client } = await setup({
+      search: () => ({ opr_code: "0", result: [{ mk_id: "SO1", count_code: "PP-5" }] }),
+      get_document: () => ({ opr_code: "0", mk_id: "SO1", count_code: "PP-5", buyer_order: "566_2026" }),
+    });
+    const result = await client.callTool({ name: "get_proof_of_delivery", arguments: { order_number: "PP-5" } });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(/no tracking code yet/);
+  });
+
+  it("get_delivery_prices lists rows by weight, optionally only those valid on a date", async () => {
+    const { client } = await setup({
+      get_delivery_service_pricelist: () => ({
+        opr_code: "0",
+        pricelist_list: [
+          {
+            currency_code: "EUR",
+            delivery_type: "GLS Slovenija",
+            package_delivered_status_list: ["Delivered", "Picked up"],
+            package_return_status_list: ["Returned"],
+            pricelist_rows: [
+              { cod_cost: "3", package_delivery_cost: "4", package_weight: "5", return_cost: "2", transport_cost: "5", valid_from: "2026-01-01+01:00", valid_to: "2026-06-30+02:00" },
+              { cod_cost: "3", package_delivery_cost: "2", package_weight: "2", return_cost: "4", transport_cost: "1", valid_from: "2026-01-01+01:00" },
+            ],
+          },
+          { delivery_type: "GLS Italy", pricelist_rows: [] },
+        ],
+      }),
+    });
+    const data = json(await client.callTool({ name: "get_delivery_prices", arguments: { delivery_type: "slovenija", valid_on: "2026-10-05" } }));
+    expect(data.delivery_types).toEqual([
+      {
+        delivery_type: "GLS Slovenija",
+        currency: "EUR",
+        delivered_statuses: ["Delivered", "Picked up"],
+        returned_statuses: ["Returned"],
+        rows: [{ up_to_kg: 2, transport: 1, delivery: 2, cash_on_delivery: 3, return: 4, valid_from: "2026-01-01" }],
+      },
+    ]);
+  });
+
+  it("check_blacklist reports matches, and explains Metakocka's internal error", async () => {
+    let fail = false;
+    const { client, calls } = await setup({
+      search_blacklist_partner: () =>
+        fail ? { opr_code: 1, opr_desc: "Internal server error." } : { opr_code: "0", partner_list_count: "1", partner_list: [{ customer: "Janez Novak", email: "janez@example.com" }] },
+    });
+    const data = json(await client.callTool({ name: "check_blacklist", arguments: { email: "janez@example.com" } }));
+    expect(calls[0]!.body).toMatchObject({ partner_email: "janez@example.com" });
+    expect(data).toEqual({ blacklisted: true, matches: [{ name: "Janez Novak", email: "janez@example.com" }] });
+    fail = true;
+    const failed = await client.callTool({ name: "check_blacklist", arguments: { name: "Janez" } });
+    expect(failed.isError).toBe(true);
+    expect(text(failed)).toMatch(/blacklist \(črna lista\) is probably not in use/);
+  });
+
+  it("get_external_stock lists the external ERP's stock, filtered by product code", async () => {
+    const { client, calls } = await setup({
+      "json/warehouse_list": () => WAREHOUSES,
+      source_stock: () => ({
+        opr_code: "0",
+        stock_list: [
+          { warehouse_id: "1600000042", warehouse_mark: "oznaka1", mk_id: "1", count_code: "1736", code: "ABC-1", amount: "620", unit: "kos" },
+          { warehouse_id: "1600000067", warehouse_mark: "oznaka2", mk_id: "1", count_code: "1736", code: "ABC-1", amount: "119", unit: "kos" },
+          { warehouse_id: "1600000042", warehouse_mark: "oznaka1", mk_id: "2", count_code: "1737", code: "ABC-2", amount: "0", unit: "kos" },
+        ],
+      }),
+    });
+    const data = json(await client.callTool({ name: "get_external_stock", arguments: { product_codes: "abc-1" } }));
+    expect(calls.find((c) => c.endpoint === "source_stock")!.body.wh_id_list).toBeUndefined();
+    expect(data).toMatchObject({
+      rows: 2,
+      stock: [
+        { code: "ABC-1", warehouse: "Glavno skladišče", amount: 620 },
+        { code: "ABC-1", warehouse: "Maribor", amount: 119 },
+      ],
+      totals: [{ code: "ABC-1", amount: 739, unit: "kos" }],
+    });
+    await client.callTool({ name: "get_external_stock", arguments: { warehouse: "Maribor" } });
+    expect(calls.filter((c) => c.endpoint === "source_stock").at(-1)!.body.wh_id_list).toBe("1600000067");
+  });
+
+  it("get_document_pdf as_link prints asynchronously, polling at most every 10 seconds", async () => {
+    const waits: number[] = [];
+    let polls = 0;
+    const { client, calls } = await setup(
+      {
+        report: (body) => {
+          if (!body.token) return { opr_code: "0", token: "T1" };
+          polls++;
+          return polls < 2 ? { opr_code: "0", token: "T1", progress: "Izdelava izhodne datoteke" } : { opr_code: "0", token: "T1", url: "https://s3.example.com/racun_1_2026.pdf" };
+        },
+      },
+      { sleep: async (ms) => void waits.push(ms) },
+    );
+    const data = json(await client.callTool({ name: "get_document_pdf", arguments: { doc_type: "sales_bill_domestic", id: "INV1", as_link: true } }));
+    expect(calls.map((c) => c.body)).toEqual([
+      expect.objectContaining({ mk_id: "INV1", report_id: "38", async: "true" }),
+      expect.objectContaining({ token: "T1", async: "true" }),
+      expect.objectContaining({ token: "T1", async: "true" }),
+    ]);
+    expect(waits.every((ms) => ms >= 10_000)).toBe(true);
+    expect(data).toMatchObject({ id: "INV1", download_url: "https://s3.example.com/racun_1_2026.pdf", link_expires_at: "2026-10-06T10:00:00.000Z" });
+  });
+
+  it("get_document_pdf prints in the background when the normal print-out times out", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mk-async-"));
+    const { client } = await setup(
+      {
+        report: (body) => {
+          if (body.async !== "true") throw Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+          return body.token ? { opr_code: "0", url: "https://s3.example.com/r.pdf" } : { opr_code: "0", token: "T2" };
+        },
+      },
+      {
+        pdfDir: dir,
+        sleep: async () => {},
+        fetchFile: (async () => new Response(new Uint8Array([37, 80, 68, 70]), { status: 200 })) as typeof fetch,
+      },
+    );
+    const data = json(await client.callTool({ name: "get_document_pdf", arguments: { doc_type: "sales_bill_domestic", id: "INV1" } }));
+    expect([...(await readFile(data.saved_to))]).toEqual([37, 80, 68, 70]);
+    await rm(dir, { recursive: true, force: true });
   });
 
   it("stock_movements skips retail bills that were shipped with a packing list", async () => {

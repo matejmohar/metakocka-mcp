@@ -99,3 +99,12 @@ export function samePeriodLastYear(from: string, to: string): Period {
     to: toWasMonthEnd ? `${prevTo.slice(0, 8)}${String(lastDayOfMonth(py, pm)).padStart(2, "0")}` : prevTo,
   };
 }
+
+/**
+ * "2026-01-15" → "2026-01-15T00:00:00+02:00", a timestamp at the start of a day. Metakocka parses only a literal
+ * "+02:00" offset (see the note at the top), so in winter this is 23:00 the evening before: an hour early, never late.
+ */
+export function mkDayStart(isoDate: string): string {
+  if (!isIsoDate(isoDate)) throw new Error(`Invalid date "${isoDate}", expected YYYY-MM-DD`);
+  return `${isoDate}T00:00:00+02:00`;
+}

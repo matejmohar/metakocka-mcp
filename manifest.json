@@ -125,6 +125,26 @@
       "description": "Spending on supplier invoices, grouped and optionally compared."
     },
     {
+      "name": "get_external_stock",
+      "description": "Stock kept in an external ERP (Navision, Vasco), per product and warehouse."
+    },
+    {
+      "name": "get_messages",
+      "description": "SMS, Viber and WhatsApp threads with customers, per order or with new replies."
+    },
+    {
+      "name": "get_proof_of_delivery",
+      "description": "The delivery service's proof of delivery for an order's parcel."
+    },
+    {
+      "name": "get_delivery_prices",
+      "description": "Delivery price lists per delivery type and package weight."
+    },
+    {
+      "name": "check_blacklist",
+      "description": "Whether a customer is on the company's blacklist."
+    },
+    {
       "name": "get_bank_balances",
       "description": "How much is on each bank account, from its last statement."
     },
