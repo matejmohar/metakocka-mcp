@@ -45,6 +45,15 @@
         "METAKOCKA_WRITE_PURCHASE_INVOICES": "${user_config.allow_purchase_invoices}",
         "METAKOCKA_WRITE_PARTNERS": "${user_config.allow_partners}",
         "METAKOCKA_WRITE_PRODUCTS": "${user_config.allow_products}",
+        "METAKOCKA_WRITE_PAYMENTS": "${user_config.allow_payments}",
+        "METAKOCKA_WRITE_ORDERS": "${user_config.allow_orders}",
+        "METAKOCKA_WRITE_CREDIT_NOTES": "${user_config.allow_credit_notes}",
+        "METAKOCKA_WRITE_PURCHASE_ORDERS": "${user_config.allow_purchase_orders}",
+        "METAKOCKA_WRITE_WAREHOUSE": "${user_config.allow_warehouse}",
+        "METAKOCKA_WRITE_SHIPPING": "${user_config.allow_shipping}",
+        "METAKOCKA_WRITE_COMPLAINTS": "${user_config.allow_complaints}",
+        "METAKOCKA_WRITE_MESSAGES": "${user_config.allow_messages}",
+        "METAKOCKA_USER_EMAIL": "${user_config.user_email}",
         "METAKOCKA_WRITE_CONFIRM": "${user_config.confirm_documents}"
       }
     }
@@ -123,8 +132,48 @@
       "description": "Spending on supplier invoices, grouped and optionally compared."
     },
     {
+      "name": "get_external_stock",
+      "description": "Stock kept in an external ERP (Navision, Vasco), per product and warehouse."
+    },
+    {
+      "name": "get_messages",
+      "description": "SMS, Viber and WhatsApp threads with customers, per order or with new replies."
+    },
+    {
+      "name": "get_proof_of_delivery",
+      "description": "The delivery service's proof of delivery for an order's parcel."
+    },
+    {
+      "name": "get_delivery_prices",
+      "description": "Delivery price lists per delivery type and package weight."
+    },
+    {
+      "name": "get_email_events",
+      "description": "Whether e-mails sent through Metakocka were delivered, opened or bounced."
+    },
+    {
+      "name": "check_blacklist",
+      "description": "Whether a customer is on the company's blacklist."
+    },
+    {
+      "name": "get_bank_balances",
+      "description": "How much is on each bank account, from its last statement."
+    },
+    {
       "name": "get_bank_statements",
       "description": "Money in and out per bank account, with transactions."
+    },
+    {
+      "name": "get_cash_register",
+      "description": "Cash register journals: cash in and out, deposits, balances."
+    },
+    {
+      "name": "get_compensations",
+      "description": "Compensations: invoices settled against each other."
+    },
+    {
+      "name": "accounting_export",
+      "description": "The export for the accountant, with profiles from Metakocka, as a ZIP."
     },
     {
       "name": "draft_document",
@@ -137,6 +186,42 @@
     {
       "name": "draft_product",
       "description": "Prepare a new product, e.g. to book a received invoice to, without saving it (only when adding products is on)."
+    },
+    {
+      "name": "draft_payment",
+      "description": "Prepare a payment on an existing invoice, offer or order (off unless turned on)."
+    },
+    {
+      "name": "draft_credit_note",
+      "description": "Prepare a credit note to an invoice (off unless turned on)."
+    },
+    {
+      "name": "draft_stock_document",
+      "description": "Prepare a purchase order, packing list, goods received note, transfer or work order (off unless turned on)."
+    },
+    {
+      "name": "draft_update",
+      "description": "Prepare a change to an existing order, invoice or warehouse document (off unless turned on)."
+    },
+    {
+      "name": "draft_partner_update",
+      "description": "Prepare a change to a partner's data (only when partners are on)."
+    },
+    {
+      "name": "draft_product_update",
+      "description": "Prepare a change to a product, e.g. its price or safety stock (only when products are on)."
+    },
+    {
+      "name": "draft_shipping",
+      "description": "Prepare delivery labels, marking orders shipped, or a group expedition (off unless turned on)."
+    },
+    {
+      "name": "draft_complaint",
+      "description": "Prepare a complaint, return or replacement, or a complaint's new status (off unless turned on)."
+    },
+    {
+      "name": "draft_message",
+      "description": "Prepare an SMS, Viber, WhatsApp or e-mail to a customer (off unless turned on)."
     },
     {
       "name": "commit_document",
@@ -209,7 +294,7 @@
     "allow_invoices": {
       "type": "boolean",
       "title": "Allow creating invoices",
-      "description": "Let Claude create invoices (računi, domestic and foreign) in Metakocka, also from an offer. They are saved not issued: you check and issue them in Metakocka. Off by default.",
+      "description": "Let Claude create invoices (računi, domestic and foreign) in Metakocka, also from an offer, and prepayment invoices, and change an invoice's status. They are saved not issued: you check and issue them in Metakocka. Off by default.",
       "required": false,
       "default": false
     },
@@ -223,16 +308,78 @@
     "allow_partners": {
       "type": "boolean",
       "title": "Allow adding partners",
-      "description": "Let Claude add a missing partner (e.g. a new supplier, from its invoice) when you agree. Checked for duplicates and confirmed by you. Partners can only be deleted in Metakocka itself. Off by default.",
+      "description": "Let Claude add a missing partner (e.g. a new supplier, from its invoice) when you agree, and change a partner's data. Checked for duplicates and confirmed by you. Partners can only be deleted in Metakocka itself. Off by default.",
       "required": false,
       "default": false
     },
     "allow_products": {
       "type": "boolean",
       "title": "Allow adding products",
-      "description": "Let Claude add a missing product (e.g. to book a received invoice to) when you agree. Checked for duplicates and confirmed by you. Off by default.",
+      "description": "Let Claude add a missing product (e.g. to book a received invoice to) when you agree, and change a product (e.g. its price or safety stock). Checked for duplicates and confirmed by you. Off by default.",
       "required": false,
       "default": false
+    },
+    "allow_payments": {
+      "type": "boolean",
+      "title": "Allow recording payments",
+      "description": "Let Claude record payments on existing invoices, offers and orders (mark an invoice paid, a supplier paid, a prepayment or a refund), never more than is open. Confirmed by you. Off by default.",
+      "required": false,
+      "default": false
+    },
+    "allow_orders": {
+      "type": "boolean",
+      "title": "Allow creating sales orders",
+      "description": "Let Claude create sales orders (prodajna naročila), invoices from them (with invoices allowed too), and change orders (status, tracking code, shipping date, or have Metakocka invoice them). Confirmed by you. Off by default.",
+      "required": false,
+      "default": false
+    },
+    "allow_credit_notes": {
+      "type": "boolean",
+      "title": "Allow creating credit notes",
+      "description": "Let Claude create credit notes (dobropisi) to invoices — returned goods or a financial correction, never more than the invoice, saved not issued — and enter suppliers' credit notes. Off by default.",
+      "required": false,
+      "default": false
+    },
+    "allow_purchase_orders": {
+      "type": "boolean",
+      "title": "Allow creating purchase orders",
+      "description": "Let Claude create purchase orders (naročilnice) to suppliers. Off by default.",
+      "required": false,
+      "default": false
+    },
+    "allow_warehouse": {
+      "type": "boolean",
+      "title": "Allow warehouse documents",
+      "description": "Let Claude create packing lists, goods received notes, delivery and receiving orders, transfers between warehouses and work orders, and change them. Packing lists and goods received notes move stock. Off by default.",
+      "required": false,
+      "default": false
+    },
+    "allow_shipping": {
+      "type": "boolean",
+      "title": "Allow shipping",
+      "description": "Let Claude print delivery labels (registers parcels with the delivery service), mark orders shipped and make group expeditions. Off by default.",
+      "required": false,
+      "default": false
+    },
+    "allow_complaints": {
+      "type": "boolean",
+      "title": "Allow complaints",
+      "description": "Let Claude create complaints, returns and replacements for orders, and change their status. Off by default.",
+      "required": false,
+      "default": false
+    },
+    "allow_messages": {
+      "type": "boolean",
+      "title": "Allow messages to customers",
+      "description": "Let Claude send SMS, Viber, WhatsApp and e-mail to customers through Metakocka, after you confirm each one. Sent messages can't be recalled. Off by default.",
+      "required": false,
+      "default": false
+    },
+    "user_email": {
+      "type": "string",
+      "title": "Your Metakocka user e-mail (optional)",
+      "description": "Some Metakocka calls (complaints, blacklist) ask which user makes them.",
+      "required": false
     },
     "confirm_documents": {
       "type": "boolean",

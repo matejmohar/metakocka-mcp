@@ -5,6 +5,7 @@
  */
 import { randomBytes } from "node:crypto";
 import type { MkRecord } from "../api.js";
+import type { ChangeSpec } from "./change.js";
 import type { WritableDocType } from "./settings.js";
 
 export type DraftStatus =
@@ -33,6 +34,8 @@ export interface DraftLine {
   net: number;
   tax: number;
   gross: number;
+  /** The category whose partner discount this line got. */
+  partnerDiscount?: string;
 }
 
 export interface DraftTotals {
@@ -59,8 +62,24 @@ export interface Draft {
   summary: string;
   /** A file to attach once the document is saved (purchase invoices: the supplier's PDF). Never logged. */
   attachment?: { fileName: string; dataB64: string; bytes: number; attached?: boolean };
+  /** A change to an existing document (payment, status): which one, and what it looked like when drafted. */
+  target?: {
+    docType: string;
+    mkId: string;
+    number?: string;
+    /** Payments: sum_paid when drafted, and how much the payment changes it (negative for a refund). */
+    paidBefore?: number;
+    paidChange?: number;
+    /** Status changes: the status when drafted, and the new one. */
+    statusBefore?: string;
+    status?: string;
+  };
+  /** New documents Metakocka saves with their own endpoint instead of put_document (transfers, work orders). */
+  putEndpoint?: string;
+  /** For changes saved with their own call (see change.ts): which call, and how to tell it took effect. */
+  change?: ChangeSpec;
   /** Set once committed. */
-  result?: { mkId?: string; number?: string; /** A new partner's address. */ addressId?: string };
+  result?: { mkId?: string; number?: string; /** A new partner's address. */ addressId?: string; /** What a change call answered, for the tool's result. */ details?: Record<string, unknown> };
 }
 
 export const DRAFT_TTL_MS = 15 * 60_000;

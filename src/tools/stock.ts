@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
-import { listAllProducts, listProducts, searchAcrossTypes } from "../api.js";
+import { listAllProducts, listProducts, searchAcrossTypes, sourceStock } from "../api.js";
 import { MetakockaError } from "../client.js";
 import { addDays, daysBetween, todayInLjubljana } from "../dates.js";
 import {
@@ -13,7 +13,7 @@ import {
   type StockFlag,
   type WarehouseRef,
 } from "../inventory.js";
-import { str } from "../util.js";
+import { list, num, round2, str } from "../util.js";
 import { isoDate } from "./documents.js";
 import { stockValuationOutput } from "./output-schemas.js";
 import {
@@ -220,6 +220,59 @@ export function registerStockTools(server: McpServer, ctx: ToolContext): void {
           note:
             "Work orders are not included. Without a warehouse filter, transfers between warehouses do not change the total.",
           ...truncationWarning(truncatedTypes, "shorten the period or raise max_documents"),
+        };
+      }),
+  );
+
+  server.registerTool(
+    "get_external_stock",
+    {
+      title: "Stock from the external ERP",
+      description:
+        "Stock as kept in an external ERP (e.g. Navision, Vasco) for companies that manage stock there rather than in Metakocka: " +
+        "per product and warehouse, less today's invoices and credit notes made in Metakocka. For stock kept in Metakocka " +
+        "itself use get_stock.",
+      inputSchema: z.object({
+        product_codes: z.string().optional().describe("Comma-separated product codes or product numbers, e.g. 'ABC-1,ABC-2'."),
+        warehouse: z.string().optional().describe("Warehouse name, mark or id (see list_warehouses). Comma-separate several."),
+        hide_zero: z.boolean().default(false).describe("Leave out rows with zero stock."),
+        limit: z.number().int().min(1).max(5000).default(500).describe("How many rows to list."),
+      }),
+      annotations: READ_ONLY,
+    },
+    async (args) =>
+      run(async () => {
+        const warehouses = await cachedWarehouses(ctx);
+        const warehouseIds = args.warehouse ? list(args.warehouse).map((w) => str(resolveWarehouse(warehouses, w).mk_id)!) : undefined;
+        const byId = new Map(warehouses.map((w) => [str(w.mk_id) ?? "", w]));
+        const wanted = new Set(list(args.product_codes).map((c) => c.toLowerCase()));
+        const rows = (await sourceStock(ctx.getClient(), { warehouseIds }))
+          .filter((r) => !wanted.size || [r.code, r.count_code].some((v) => wanted.has(str(v)?.toLowerCase() ?? "")))
+          .map((r) => {
+            const w = byId.get(str(r.warehouse_id) ?? "");
+            return {
+              product_id: str(r.count_code),
+              code: str(r.code),
+              warehouse: w ? (str(w.name) ?? str(w.mark)) : (str(r.warehouse_mark) ?? str(r.warehouse_id)),
+              amount: num(r.amount) ?? 0,
+              unit: str(r.unit),
+            };
+          })
+          .filter((r) => !args.hide_zero || r.amount !== 0);
+        const totals = new Map<string, { code?: string; amount: number; unit?: string }>();
+        for (const r of rows) {
+          const key = r.code ?? r.product_id ?? "?";
+          const t = totals.get(key) ?? { code: key, amount: 0, unit: r.unit };
+          t.amount = round2(t.amount + r.amount);
+          totals.set(key, t);
+        }
+        const listed = rows.slice(0, args.limit);
+        return {
+          rows: rows.length,
+          stock: listed,
+          ...(rows.length > listed.length ? { rows_not_listed: rows.length - listed.length } : {}),
+          ...(wanted.size ? { totals: [...totals.values()] } : {}),
+          ...(rows.length ? {} : { note: "No stock rows from the external ERP (the company may keep its stock in Metakocka: use get_stock)." }),
         };
       }),
   );

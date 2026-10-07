@@ -18,6 +18,7 @@ import { asArray, num, round2, str } from "../util.js";
 import { loadCatalog, type CatalogProduct } from "./catalog.js";
 import {
   CHANGE_LOG_PREFIX,
+  currencyCode,
   DraftError,
   linesAndTotals,
   money,
@@ -62,6 +63,8 @@ export interface PurchaseInput {
   note?: string;
   /** Local path of the supplier's invoice (PDF or image), attached once saved. */
   attachment_path?: string;
+  /** ISO currency of the supplier's invoice (default EUR). */
+  currency?: string;
   language?: "sl" | "en";
 }
 
@@ -152,7 +155,8 @@ export async function buildPurchaseDraft(
     }
   }
   if (!lines.length) throw new DraftError("Every line is negative; enter this invoice in Metakocka.");
-  const totals = totalsOf(lines);
+  const currency = currencyCode(input.currency);
+  const totals = totalsOf(lines, currency);
 
   // The total on the supplier's invoice must come out of the lines to the cent.
   const computed = round2(totals.gross + leftOut.reduce((s, l) => s + l.total, 0));
@@ -187,7 +191,7 @@ export async function buildPurchaseDraft(
   const sl = (input.language ?? "sl") === "sl";
   const leftOutNote = leftOut.length
     ? (sl ? "Ročno dodaj vrstice, ki jih API ne sprejme: " : "Add by hand the lines the API doesn't take: ") +
-      leftOut.map((l) => `${oneLine(l.description)} ${money(l.total, sl ? "sl" : "en")}`).join("; ")
+      leftOut.map((l) => `${oneLine(l.description)} ${money(l.total, sl ? "sl" : "en", currency)}`).join("; ")
     : undefined;
   const note = [input.note?.trim(), leftOutNote].filter(Boolean).join("\n") || undefined;
   if (leftOut.length) warnings.push(`${leftOut.length} negative line(s) are left out: add them in Metakocka after saving. ${leftOutNote}`);
@@ -201,7 +205,7 @@ export async function buildPurchaseDraft(
     ...(input.service_from ? { service_from_date: toMkDate(input.service_from) } : {}),
     ...(input.service_to ? { service_to_date: toMkDate(input.service_to) } : {}),
     partner: { mk_id: partner.id, mk_address_id: address.id },
-    currency_code: "EUR",
+    currency_code: currency,
     ...(note ? { notes: note } : {}),
     product_list: lines.map((l, i) => ({
       mk_id: l.productId,
@@ -241,7 +245,7 @@ export async function buildPurchaseDraft(
   return { draft, warnings, info };
 }
 
-function purchaseProduct(catalog: Map<string, CatalogProduct>, line: PurchaseLineInput, n: number): CatalogProduct {
+export function purchaseProduct(catalog: Map<string, CatalogProduct>, line: PurchaseLineInput, n: number): CatalogProduct {
   let product: CatalogProduct | undefined;
   if (line.product_id) product = catalog.get(line.product_id);
   else if (line.code) {
@@ -266,7 +270,7 @@ function purchaseProduct(catalog: Map<string, CatalogProduct>, line: PurchaseLin
  * The tax code for a VAT rate: the one this supplier's last invoice used for this product when the
  * catalogue gives it that rate, else the only code with that rate in the catalogue.
  */
-function taxCodeFor(catalog: Map<string, CatalogProduct>, history: MkRecord[], product: CatalogProduct, rate: number, n: number): string {
+export function taxCodeFor(catalog: Map<string, CatalogProduct>, history: MkRecord[], product: CatalogProduct, rate: number, n: number): string {
   const codes = new Set<string>();
   for (const p of catalog.values()) if (p.taxCode && p.taxRatePercent === rate) codes.add(p.taxCode);
   for (const d of history) {
@@ -345,7 +349,7 @@ function summarize(
     "",
     ...linesAndTotals(withDesc),
     ...(extra.leftOut.length
-      ? ["", `${t.leftOut}:`, ...extra.leftOut.map((l) => `  − ${oneLine(l.description)} ${money(l.total, d.language)}`)]
+      ? ["", `${t.leftOut}:`, ...extra.leftOut.map((l) => `  − ${oneLine(l.description)} ${money(l.total, d.language, d.totals.currency)}`)]
       : []),
     "",
     [

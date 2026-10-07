@@ -2,7 +2,7 @@
  * Domain-level operations on top of MetakockaClient. Tools call these; they
  * know Metakocka's endpoint names, paging rules and response shapes.
  */
-import { MetakockaError, type MetakockaClient } from "./client.js";
+import { MetakockaError, type BinaryResponse, type MetakockaClient } from "./client.js";
 import type { DocType } from "./doc-types.js";
 import { fromMkDate, toMkDate } from "./dates.js";
 import { asArray, num, str } from "./util.js";
@@ -390,4 +390,195 @@ export async function listBankStatements(
     if (page.length < limit) return { statements, truncated: false };
   }
   return { statements, truncated: true };
+}
+
+/** Closing balance of every bank account, from its last statement (get_bank_statement_status). */
+export async function bankStatementStatus(client: MetakockaClient): Promise<MkRecord[]> {
+  const response = await client.call("get_bank_statement_status");
+  return asArray<MkRecord>(response.statement_list);
+}
+
+/** Every record of a paged json/ list endpoint dated in [dateFrom, dateTo], up to `max`. */
+async function listDated(
+  client: MetakockaClient,
+  endpoint: string,
+  listKey: string,
+  q: { dateFrom: string; dateTo: string; max: number; extra?: MkRecord },
+  onPage?: (fetched: number) => void,
+): Promise<{ records: MkRecord[]; truncated: boolean }> {
+  const records: MkRecord[] = [];
+  while (records.length < q.max) {
+    const limit = Math.min(BANK_PAGE_MAX, q.max - records.length);
+    const response = await client.call(endpoint, {
+      doc_date_from: toMkDate(q.dateFrom),
+      doc_date_to: toMkDate(q.dateTo),
+      limit,
+      offset: records.length,
+      ...q.extra,
+    });
+    const page = asArray<MkRecord>(response[listKey]);
+    records.push(...page);
+    onPage?.(records.length);
+    if (page.length < limit) return { records, truncated: false };
+  }
+  return { records, truncated: true };
+}
+
+/** Compensations (kompenzacije): invoices settled against each other instead of paid. */
+export function listCompensations(
+  client: MetakockaClient,
+  q: { dateFrom: string; dateTo: string; max: number },
+  onPage?: (fetched: number) => void,
+): Promise<{ records: MkRecord[]; truncated: boolean }> {
+  return listDated(client, "json/get_bank_compensation", "result", q, onPage);
+}
+
+/** Cash register journals (blagajniški dnevniki), one per register and day, with their transactions. */
+export function listCashRegisterJournals(
+  client: MetakockaClient,
+  q: { dateFrom: string; dateTo: string; max: number; cashRegister?: string },
+  onPage?: (fetched: number) => void,
+): Promise<{ records: MkRecord[]; truncated: boolean }> {
+  const extra = q.cashRegister ? { cash_register: q.cashRegister } : undefined;
+  return listDated(client, "json/cash_register_journal", "cash_register_journal_list", { ...q, extra }, onPage);
+}
+
+/**
+ * Run an accounting export (izvoz za računovodstvo) with profiles defined in
+ * Metakocka. Answers with a link to a ZIP file, valid for an hour. Metakocka
+ * runs one export at a time and an export can take a while, so it is never
+ * retried (a retry would only queue a second export).
+ */
+export async function accountingExport(
+  client: MetakockaClient,
+  q: { profiles: string[]; dateFrom: string; dateTo: string; attachments: boolean; timeoutMs: number },
+): Promise<{ url: string; jobId?: string }> {
+  let response: MkRecord;
+  try {
+    response = await client.call(
+      "accounting_export",
+      {
+        profile_name_list: q.profiles,
+        from_date: toMkDate(q.dateFrom),
+        to_date: toMkDate(q.dateTo),
+        export_attachment: String(q.attachments),
+      },
+      { idempotent: false, timeoutMs: q.timeoutMs },
+    );
+  } catch (error) {
+    // An unknown profile name makes Metakocka fail with a bare NullPointerException.
+    if (error instanceof MetakockaError && /NullPointerException/.test(error.message)) {
+      throw new MetakockaError(
+        `Metakocka could not run the export: ${error.message}. Usually a profile name is wrong — use the profile names ` +
+          "(or ids) exactly as under Settings → Accounting export (Nastavitve → Izvoz v računovodstvo) in Metakocka.",
+        error.oprCode,
+      );
+    }
+    throw error;
+  }
+  const url = str(response.result_url);
+  if (!url) throw new MetakockaError("Metakocka finished the export but returned no file.");
+  return { url, jobId: str(response.job_id) };
+}
+
+/**
+ * Partners on the company's blacklist (črna lista) matching an e-mail, phone
+ * or name. Metakocka asks which of its users is searching (api_user_email).
+ */
+export async function searchBlacklist(
+  client: MetakockaClient,
+  q: { email?: string; phone?: string; name?: string; userEmail?: string },
+): Promise<MkRecord[]> {
+  try {
+    const response = await client.call("search_blacklist_partner", {
+      ...(q.userEmail ? { api_user_email: q.userEmail } : {}),
+      ...(q.email ? { partner_email: q.email } : {}),
+      ...(q.phone ? { partner_phone_number: q.phone } : {}),
+      ...(q.name ? { partner_name: q.name } : {}),
+    });
+    return asArray<MkRecord>(response.partner_list);
+  } catch (error) {
+    if (error instanceof MetakockaError && error.oprCode === "1" && /internal server error/i.test(error.message)) {
+      throw new MetakockaError(
+        "Metakocka could not search the blacklist (internal server error). The blacklist (črna lista) is probably not in use " +
+          "for this company" +
+          (q.userEmail ? "" : ", or Metakocka needs the e-mail of one of its users: set METAKOCKA_USER_EMAIL") +
+          ".",
+        error.oprCode,
+      );
+    }
+    throw error;
+  }
+}
+
+/** SMS / Viber / WhatsApp threads, for one sales order or with inbound messages since a time. Lives at /rest/eshop/get_message. */
+export async function getMessages(
+  client: MetakockaClient,
+  q: { type: "sms" | "viber" | "whatsapp"; docType?: string; docId?: string; inboundSince?: string },
+): Promise<MkRecord[]> {
+  const response = await client.call("../get_message", {
+    type: q.type,
+    ...(q.docId ? { doc_type: q.docType ?? "sales_order", doc_id: q.docId } : {}),
+    ...(q.inboundSince ? { return_new_inbound_messages_from: q.inboundSince } : {}),
+  });
+  return asArray<MkRecord>(response.message_list);
+}
+
+/** The delivery service's proof of delivery for a sales order's parcel, as a file. Lives at /rest/eshop/get_proof_of_delivery. */
+export function getProofOfDelivery(client: MetakockaClient, buyerOrder: string, trackingCode: string): Promise<BinaryResponse> {
+  return client.callBinary("../get_proof_of_delivery", { buyer_order: buyerOrder, tracking_code: trackingCode });
+}
+
+/** Price lists of the delivery types (dostavne službe), all of them. */
+export async function deliveryPriceLists(client: MetakockaClient): Promise<MkRecord[]> {
+  const response = await client.call("get_delivery_service_pricelist");
+  return asArray<MkRecord>(response.pricelist_list);
+}
+
+/**
+ * Stock as kept in an external ERP (Navision, Vasco …), less today's invoices
+ * and credit notes made in Metakocka.
+ */
+export async function sourceStock(client: MetakockaClient, q: { warehouseIds?: string[]; productIds?: string[] }): Promise<MkRecord[]> {
+  const response = await client.call("source_stock", {
+    ...(q.warehouseIds?.length ? { wh_id_list: q.warehouseIds.join(",") } : {}),
+    ...(q.productIds?.length ? { product_mk_id_list: q.productIds.join(",") } : {}),
+  });
+  return asArray<MkRecord>(response.stock_list);
+}
+
+/** Metakocka answers progress checks of an asynchronous print at most once every 10 seconds. */
+export const ASYNC_REPORT_POLL_MS = 10_500;
+
+/**
+ * Print a report asynchronously: start it, then check every 10 seconds until
+ * Metakocka gives a download link (valid for a day). For print-outs that take
+ * longer than a request may, and for links to share.
+ */
+export async function printReportAsync(
+  client: MetakockaClient,
+  q: { docId: string; reportId: string; maxWaitMs: number },
+  options: { sleep?: (ms: number) => Promise<void>; onProgress?: (message: string) => void } = {},
+): Promise<{ url: string; token: string }> {
+  const sleep = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const base = { mk_id: q.docId, report_id: q.reportId, async: "true", params: [{ type: "REPORT_TYPE", value: "PDF" }] };
+  const started = await client.call("report", base);
+  const token = str(started.token);
+  if (!token) throw new MetakockaError("Metakocka did not start the print-out (no token).");
+  for (let waited = 0; waited <= q.maxWaitMs; waited += ASYNC_REPORT_POLL_MS) {
+    await sleep(ASYNC_REPORT_POLL_MS);
+    const state = await client.call("report", { ...base, token });
+    const url = str(state.url);
+    if (url) return { url, token };
+    const progress = str(state.progress);
+    if (progress) options.onProgress?.(progress);
+  }
+  throw new MetakockaError(`The print-out is not ready after ${Math.round(q.maxWaitMs / 1000)} s; Metakocka is still working on it.`);
+}
+
+/** Delivery events (sent, delivered, opened, bounced …) of e-mails sent through send_message. Lives at /rest/eshop/get_email_events. */
+export async function getEmailEvents(client: MetakockaClient, ids: string[]): Promise<MkRecord[]> {
+  const response = await client.call("../get_email_events", { mk_id_list: ids });
+  // Metakocka answers with a bare list, which the client hands over as { list }.
+  return asArray<MkRecord>(response.list);
 }

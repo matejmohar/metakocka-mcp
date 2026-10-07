@@ -201,13 +201,16 @@ export class MetakockaClient {
     } catch {
       throw new MetakockaError(`Metakocka returned a non-JSON response for ${endpoint}`);
     }
-    if (!data || typeof data !== "object" || Array.isArray(data)) {
+    // A few endpoints (get_email_events) answer with a bare list; it is passed on as { list: [...] }.
+    if (Array.isArray(data)) return { list: data } as T;
+    if (!data || typeof data !== "object") {
       throw new MetakockaError(`Metakocka returned an unexpected response for ${endpoint}`);
     }
 
     const oprCode = (data as Json).opr_code;
     if (oprCode !== undefined && String(oprCode) !== "0") {
-      const desc = (data as Json).opr_desc;
+      // Most endpoints describe the error in opr_desc; accounting_export in error_desc, product calls in opr_desc_app.
+      const desc = (data as Json).opr_desc ?? (data as Json).error_desc ?? (data as Json).opr_desc_app;
       throw new MetakockaError(
         `Metakocka error (${endpoint}): ${this.redact(String(desc ?? `opr_code ${String(oprCode)}`))}`,
         String(oprCode),

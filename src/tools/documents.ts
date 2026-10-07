@@ -10,16 +10,20 @@ import {
   getDocument,
   INVOICE_REPORT_ID,
   printDocumentPdf,
+  printReportAsync,
   searchDocuments,
   type AdvancedFilter,
 } from "../api.js";
 import { pdfDirectory } from "../config.js";
-import { MetakockaError } from "../client.js";
+import { MetakockaError, NetworkError } from "../client.js";
 import { isIsoDate } from "../dates.js";
 import { DOC_TYPE_VALUES, INVOICE_TYPES, isInvoiceType } from "../doc-types.js";
 import { cleanDocument, summarizeDocument } from "../summarize.js";
 import { list, str } from "../util.js";
-import { READ_ONLY, run, type ToolContext, type ToolResult } from "./shared.js";
+import { progressReporter, READ_ONLY, run, type ToolContext, type ToolResult } from "./shared.js";
+
+/** How long an asynchronous print-out may take before giving up. */
+const ASYNC_PRINT_MAX_MS = 5 * 60_000;
 
 export const docTypeSchema = z
   .enum(DOC_TYPE_VALUES)
@@ -183,7 +187,9 @@ export function registerDocumentTools(server: McpServer, ctx: ToolContext): void
           : "Print a document as PDF, exactly as Metakocka prints it, and save it on this computer (by default in Downloads/Metakocka). " +
             "Returns the file path and a link to open it. ") +
         "Works for sales and purchase invoices out of the box; other document types " +
-        "need the report_id of their print-out. This does not change anything in Metakocka.",
+        "need the report_id of their print-out. With as_link it returns a download link instead, valid for a day (e.g. to " +
+        "send to a customer); large print-outs that time out are printed that way automatically. This does not change " +
+        "anything in Metakocka.",
       inputSchema: z
         .object({
           doc_type: docTypeSchema,
@@ -197,12 +203,13 @@ export function registerDocumentTools(server: McpServer, ctx: ToolContext): void
               "Metakocka print-out (report) id. Not needed for invoices. For other types, open the print-out in Metakocka, add " +
                 "'&dump_for_report_rest=true' to the address and use the report_id shown.",
             ),
+          as_link: z.boolean().default(false).describe("Return a download link valid for 24 hours instead of the file."),
         })
         .refine((a) => a.id || a.number, { message: "Provide either id or number." }),
       // Saving writes a local file, but never changes Metakocka.
       annotations: embedded ? READ_ONLY : { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
-    async (args): Promise<ToolResult> => {
+    async (args, extra): Promise<ToolResult> => {
       let saved: { path: string; name: string } | undefined;
       let pdf: { name: string; bytes: Uint8Array } | undefined;
       const result = await run(async () => {
@@ -217,7 +224,24 @@ export function registerDocumentTools(server: McpServer, ctx: ToolContext): void
         const id = args.id ?? (await findDocumentIdByNumber(client, args.doc_type, args.number!));
         if (!id) throw new MetakockaError(`No ${args.doc_type} with number "${args.number}" was found.`);
 
-        const bytes = await printDocumentPdf(client, id, reportId);
+        const printAsync = () =>
+          printReportAsync(client, { docId: id, reportId, maxWaitMs: ASYNC_PRINT_MAX_MS }, { sleep: ctx.sleep, onProgress: progressReporter(extra) });
+        if (args.as_link) {
+          const { url } = await printAsync();
+          const expires = new Date(ctx.now().getTime() + 24 * 60 * 60_000).toISOString();
+          return { doc_type: args.doc_type, id, download_url: url, link_expires_at: expires };
+        }
+        let bytes: Uint8Array;
+        try {
+          bytes = await printDocumentPdf(client, id, reportId);
+        } catch (error) {
+          // A long print-out outlasts the request; Metakocka can print it in the background instead.
+          if (!(error instanceof NetworkError && error.code === "TIMEOUT")) throw error;
+          const { url } = await printAsync();
+          const response = await (ctx.fetchFile ?? fetch)(url);
+          if (!response.ok) throw new MetakockaError(`The print-out is ready, but downloading it failed (HTTP ${response.status}). Link, valid for a day: ${url}`);
+          bytes = new Uint8Array(await response.arrayBuffer());
+        }
         const name = `${args.doc_type}_${(args.number ?? id).replace(/[^\p{L}\p{N}._-]+/gu, "-")}.pdf`;
         const sizeKb = Math.round(bytes.length / 102.4) / 10;
         if (embedded) {

@@ -176,9 +176,12 @@ export function registerPrompts(server: McpServer): void {
           `3. search_documents for sales_bill_credit_note dated in ${month}.\n` +
           "4. get_unpaid_invoices for receivables, and again with purchase invoice types for payables.\n" +
           "5. stock_valuation and low_stock (these show stock as of today, not the end of the month — say so).\n" +
-          "Write a month-end summary (revenue, spending, credit notes, receivables and payables with aging, stock value), " +
-          "then a checklist of what to check before handing over to the accountant: unusual changes vs. last year, " +
-          "large overdue receivables, supplier invoices due soon, credit notes to explain, negative or missing stock. " +
+          `6. get_bank_balances, and get_compensations for ${month}.\n` +
+          "Write a month-end summary (revenue, spending, credit notes, receivables and payables with aging, stock value, " +
+          "bank balances), then a checklist of what to check before handing over to the accountant: unusual changes vs. last year, " +
+          "large overdue receivables, supplier invoices due soon, credit notes to explain, compensations, bank statements not " +
+          "entered up to the month's end, negative or missing stock. Finally offer to run accounting_export for the month " +
+          "(ask for the export profile names; it can't list them). " +
           languageLine(language),
       ),
   );
