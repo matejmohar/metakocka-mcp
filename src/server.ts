@@ -95,22 +95,32 @@ function urlFromEnvIfValid(): string | undefined {
 export function writeInstructions(confirm: "client" | "elicitation" | "never", docTypes: readonly string[] = ["sales_offer"]): string {
   const what = [
     docTypes.includes("sales_offer") && "offers (ponudba / predračun)",
-    docTypes.some((t) => t.startsWith("sales_bill_")) && "invoices (račun, saved not issued; also from an offer)",
+    docTypes.includes("sales_order") && "sales orders (prodajno naročilo)",
+    docTypes.some((t) => t.startsWith("sales_bill_")) && `invoices (račun, saved not issued; also from an offer${docTypes.includes("sales_order") ? " or order" : ""})`,
     docTypes.some((t) => t.startsWith("purchase_bill_")) && "received invoices (prejeti račun, copied from the supplier's invoice)",
     docTypes.includes("partner") && "partners",
     docTypes.includes("product") && "products",
   ].filter(Boolean);
   const records = [docTypes.includes("partner") && "partners", docTypes.includes("product") && "products"].filter(Boolean);
   const recordTools = [docTypes.includes("partner") && "draft_partner", docTypes.includes("product") && "draft_product"].filter(Boolean);
+  const changes = [
+    docTypes.includes("payment") && "draft_payment records a payment on an existing invoice, offer or order (marks it paid)",
+    docTypes.includes("order_status") && "draft_order_status changes a sales order's status",
+  ].filter(Boolean);
   const missing = records.length
     ? `never guess ids. If a partner or product is missing, ask the user whether to add it; only then use ${recordTools.join(" / ")} ` +
       `(copy its data from the document), confirm and save it, and continue with the new id${records.length < 2 ? `; ${records[0] === "partners" ? "products" : "partners"} are never created here` : ""}. `
     : "never guess ids and never create partners or products. ";
+  const draftTools = [docTypes.some((t) => !["partner", "product", "payment", "order_status"].includes(t)) && "draft_document", ...recordTools].filter(Boolean);
+  const can = [...what, docTypes.includes("payment") && "record payments"].filter(Boolean);
   return (
-    "Access to one company's Metakocka ERP (Slovenian ERP / e-commerce back office): it reads data, and it can create " +
-    `${what.length > 1 ? `${what.slice(0, -1).join(", ")} and ${what.at(-1)}` : what[0]}. To create a document: find the partner (search_partners) and products (search_products) and use ` +
-    `their ids — ${missing}Call ${[docTypes.some((t) => t !== "partner" && t !== "product") && "draft_document", ...recordTools].filter(Boolean).join(" / ")}, show its summary to the user, ` +
-    "then commit_document. " +
+    "Access to one company's Metakocka ERP (Slovenian ERP / e-commerce back office): it reads data, and it can " +
+    `${what.length ? "create " : ""}${can.length > 1 ? `${can.slice(0, -1).join(", ")} and ${can.at(-1)}` : can[0]}. ` +
+    (draftTools.length
+      ? "To create a document: find the partner (search_partners) and products (search_products) and use " +
+        `their ids — ${missing}Call ${draftTools.join(" / ")}, show its summary to the user, then commit_document. `
+      : "") +
+    (changes.length ? `${draftTools.length ? "Likewise, " : ""}${changes.join("; ")}: draft, show the summary, then commit_document. ` : "") +
     (confirm === "never"
       ? "Save only after the user has agreed to the summary in the conversation. "
       : "The user confirms every save in their client" +

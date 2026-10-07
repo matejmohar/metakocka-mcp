@@ -12,10 +12,13 @@ Connect it to Claude (or any MCP-capable assistant) and ask questions about your
 - *"Draft polite payment reminders for the five most overdue customers."*
 - *"What do we need to reorder, and what is already on the way?"*
 - *"How did our September sales compare with last September, and which customers dropped off?"*
+- *"How much money is on our bank accounts, and what's in the cash register?"*
+- *"Prepare September's export for the accountant."*
 
-> **Read-only by default.** Out of the box it cannot create, change or delete anything in Metakocka; the only thing it
-> writes is a PDF on your own computer, when you ask for one. Creating offers, invoices, received invoices, partners and products can be turned on:
-> see [Creating documents](#creating-documents). It never changes or deletes anything.
+> **Read-only by default.** Out of the box it cannot create, change or delete anything in Metakocka; the only things it
+> writes are PDFs and accounting exports on your own computer, when you ask for one. Creating offers, sales orders, invoices,
+> received invoices, partners and products, recording payments and changing an order's status can be turned on:
+> see [Creating documents](#creating-documents). It never deletes anything.
 
 > This is an independent community project. It is not made or endorsed by Metakocka d.o.o.
 
@@ -29,6 +32,8 @@ Strežnik razume slovenska vprašanja in odgovarja v jeziku, v katerem pišete. 
 - *»Pripravi opomine za pet največjih dolžnikov.«*
 - *»Pokaži kartico partnerja ACME d.o.o. za zadnje leto.«*
 - *»Katere artikle moramo naročiti?«*
+- *»Koliko denarja imamo na računih in koliko v blagajni?«*
+- *»Pripravi izvoz za računovodstvo za september.«*
 
 Slovenski izrazi (račun, ponudba, dobavnica, dobropis, zaloga, zapadlo …) so preslikani v tipe dokumentov Metakocke,
 vir `metakocka://document-types` pa vsebuje tudi vsakdanje izraze. Vsi pozivi (npr. `payment-reminders`,
@@ -60,12 +65,18 @@ vir `metakocka://document-types` pa vsebuje tudi vsakdanje izraze. Vsi pozivi (n
 | `get_unpaid_invoices` | Open receivables (or payables): amounts owed, days overdue, aging buckets, top debtors. |
 | `sales_summary` | Revenue for a period, grouped by partner, product, month or document type; optionally for one customer and compared with the previous period or last year. |
 | `purchase_summary` | Spending on supplier invoices, with the same grouping, partner filter and comparison. |
+| `get_bank_balances` | How much is on each bank account, from its last statement, and how old that statement is. |
 | `get_bank_statements` | Money in and out per bank account, top partners, and the individual transactions. |
+| `get_cash_register` | Cash register journals (blagajna): opening and closing cash, receipts, expenses and deposits to the bank. |
+| `get_compensations` | Compensations (kompenzacije): which of our invoices and the partner's were settled against each other. |
+| `accounting_export` | The export for the accountant (izvoz v računovodstvo), run with your export profiles from Metakocka and saved as a ZIP. |
 | **Creating documents** (off unless turned on, see [Creating documents](#creating-documents)) | |
-| `draft_document` | Prepare an offer, invoice or received invoice from partners and products that already exist in Metakocka, without saving it. |
+| `draft_document` | Prepare an offer, sales order, invoice or received invoice from partners and products that already exist in Metakocka, without saving it. |
 | `draft_partner` | Prepare a new partner (e.g. a supplier, from its invoice) that isn't in Metakocka yet, without saving it. |
 | `draft_product` | Prepare a new product (e.g. to book a received invoice to), without saving it. |
-| `commit_document` | Save a prepared document, partner or product, exactly as prepared, after you confirm it. |
+| `draft_payment` | Prepare a payment on an existing invoice, offer or order (mark it paid, a supplier paid, a prepayment or a refund), without saving it. |
+| `draft_order_status` | Prepare a sales order's new status, without saving it. |
+| `commit_document` | Save a prepared document, partner, product, payment or status, exactly as prepared, after you confirm it. |
 | `discard_draft` | Drop a prepared document, partner or product. |
 
 ### Prompts
@@ -159,8 +170,8 @@ newer version exists.
 | `NODE_EXTRA_CA_CERTS` | no | CA certificate (PEM file) for an installation with a company or self-signed certificate |
 | `METAKOCKA_TIMEOUT_MS` | no | `30000` (or `METAKOCKA_TIMEOUT_SECONDS`) |
 | `METAKOCKA_CACHE_SECONDS` | no | `300` — how long warehouses and partner lookups are reused; `0` turns caching off |
-| `METAKOCKA_PDF_DIR` | no | `Downloads/Metakocka` — where `get_document_pdf` saves files |
-| `METAKOCKA_WRITE` | no | off — comma-separated `offers`, `invoices`, `purchase_invoices`, `partners`, `products`, see [Creating documents](#creating-documents) |
+| `METAKOCKA_PDF_DIR` | no | `Downloads/Metakocka` — where `get_document_pdf` and `accounting_export` save files |
+| `METAKOCKA_WRITE` | no | off — comma-separated `offers`, `orders`, `invoices`, `purchase_invoices`, `partners`, `products`, `payments`, see [Creating documents](#creating-documents) |
 | `METAKOCKA_WRITE_CONFIRM` | no | `client` — you confirm each document in a prompt, or by approving the save in your client; `elicitation` — prompts only; `never` — no confirmation |
 | `METAKOCKA_WRITE_TIMEOUT_SECONDS` | no | `120` — how long to wait for Metakocka to save a document |
 | `METAKOCKA_WRITE_LOG` | no | `~/.metakocka-mcp/writes.jsonl` — audit log of every write |
@@ -216,15 +227,22 @@ because secret keys travel in the request headers.
 
 ## Creating documents
 
-Off by default. Turn it on with `METAKOCKA_WRITE` set to any of `offers`, `invoices`, `purchase_invoices`, `partners`,
-`products` (comma-separated), or with **Allow creating offers** / **Allow creating invoices** / **Allow entering received
-invoices** / **Allow adding partners** / **Allow adding products** in the Claude Desktop extension. Claude can then create:
+Off by default. Turn it on with `METAKOCKA_WRITE` set to any of `offers`, `orders`, `invoices`, `purchase_invoices`,
+`partners`, `products`, `payments` (comma-separated), or with the matching **Allow …** settings in the Claude Desktop
+extension. Claude can then create:
 
 - offers (ponudbe, also used as predračuni): *"Pripravi ponudbo za ACME za 10 ur svetovanja."*
+- sales orders (prodajna naročila): *"Vnesi naročilo ACME št. PO-77 za 20 kosov, dobava do 20. 10."*
 - invoices (računi), domestic and foreign: *"Naredi račun za ACME za 3 ure svetovanja."*,
-  *"Izstavi račun iz ponudbe 4/2026."*
+  *"Izstavi račun iz ponudbe 4/2026."*, *"Izstavi račun za naročilo 1/2026."* (with `orders` on too)
 - received invoices (prejeti računi), domestic and foreign, copied from the supplier's invoice:
   *"Vnesi ta račun od Avanta."* (with the PDF)
+
+and change documents that already exist:
+
+- payments (`payments`): *"ACME je plačal RD-2/2026."*, *"Avantu smo plačali račun 126-039951."*, a prepayment
+  (avans) on an offer or order, or a refund
+- a sales order's status (`orders`): *"Naročilo PP-18495 je odpremljeno."*
 
 Strict rules, enforced by the server rather than left to the assistant:
 
@@ -289,9 +307,26 @@ New partners and products (`partners`, `products`):
 - **Partners can't be deleted through Metakocka's API**, only in Metakocka itself. Products can be.
 - New products get no price list: give the price on the document.
 
-Not supported yet: offers to foreign partners, foreign invoices with VAT, partners with category discounts, currencies
-other than EUR (also on received invoices), invoices from sales orders, marking received invoices paid, and lines that aren't products (Metakocka's API has no description-only
-lines). Nothing can be changed or deleted.
+Payments in particular:
+
+- **Never more than is open.** The amount defaults to what is still open on the document (for a refund: what was paid)
+  and can't be more. An invoice paid in full is refused.
+- **Payment type** as on the document's earlier payments, else the one most used on the latest documents of its type
+  (usually *Transakcijski račun*). Metakocka refuses a type that isn't in its register.
+- **Checked twice.** If the document's paid amount changed since the draft (e.g. someone entered the payment in
+  Metakocka meanwhile), nothing is saved. After saving, the paid amount must have moved by exactly the payment.
+
+Sales orders in particular:
+
+- **Like offers**: the partner, address and products by id, prices from the price list, plus the customer's order number
+  and delivery date. Foreign partners aren't supported yet.
+- **Invoice from an order.** *From order 1/2026* takes the order's partner and lines and links the invoice to it.
+- **Status** must be one of the company's own statuses (Šifranti → Prodajna naročila - status), spelled exactly. The API
+  can't list them; the statuses on existing orders are offered as hints.
+
+Not supported yet: offers and orders to foreign partners, foreign invoices with VAT, partners with category discounts,
+currencies other than EUR (also on received invoices and payments), and lines that aren't products (Metakocka's API has
+no description-only lines). Saved documents can't be edited, and nothing can be deleted.
 
 In HTTP mode, writing also requires `METAKOCKA_HTTP_TOKEN`; drafts are kept per company and key.
 

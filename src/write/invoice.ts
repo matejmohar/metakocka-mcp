@@ -1,6 +1,6 @@
 /**
  * Builds a sales invoice (račun) draft: domestic or foreign, from products or
- * from an existing offer. Metakocka saves an invoice from the API as not yet
+ * from an existing offer or sales order. Metakocka saves an invoice from the API as not yet
  * issued (no publish_ts); the user issues (prints) it in Metakocka. It moves
  * no stock. What Metakocka requires and doesn't fill in itself comes from
  * the partner: the payment term from its address or its last invoice, and on
@@ -33,12 +33,14 @@ export type InvoiceType = "sales_bill_domestic" | "sales_bill_foreign";
 
 export interface InvoiceInput {
   doc_type: InvoiceType;
-  /** Optional when the invoice is made from an offer: the offer's partner. */
+  /** Optional when the invoice is made from an offer or order: its partner. */
   partner_id?: string;
   address_id?: string;
   lines?: LineInput[];
   /** Number of an offer (e.g. "4/2026") whose lines the invoice takes and which it is linked to. */
   from_offer?: string;
+  /** Number of a sales order, the same way. */
+  from_order?: string;
   /** Service period (datum opravljene storitve); service_to defaults to the invoice date. */
   service_from?: string;
   service_to?: string;
@@ -56,6 +58,7 @@ export interface InvoiceInfo {
   service_from?: string;
   service_to: string;
   from_offer?: string;
+  from_order?: string;
 }
 
 /** How many of the partner's invoices are read for its payment term, VAT note and already-invoiced offers. */
@@ -68,11 +71,20 @@ export async function buildInvoiceDraft(
   const warnings: string[] = [];
   const foreignInvoice = input.doc_type === "sales_bill_foreign";
 
-  if (input.from_offer && input.lines?.length) throw new DraftError("Give either lines or from_offer, not both.");
-  const offer = input.from_offer ? await loadOffer(ctx, input.from_offer) : undefined;
+  if (input.from_offer && input.from_order) throw new DraftError("Give either from_offer or from_order, not both.");
+  const sourceNumber = input.from_offer ?? input.from_order;
+  if (sourceNumber && input.lines?.length) throw new DraftError(`Give either lines or ${input.from_offer ? "from_offer" : "from_order"}, not both.`);
+  const source = input.from_offer
+    ? await loadSource(ctx, "sales_offer", input.from_offer)
+    : input.from_order
+      ? await loadSource(ctx, "sales_order", input.from_order)
+      : undefined;
+  const sourceLabel = input.from_offer ? `Offer ${input.from_offer}` : `Sales order ${input.from_order}`;
+  // The rest of this function calls the source document "offer", whichever kind it is.
+  const offer = source;
   const offerPartnerId = offer ? str((offer.partner as MkRecord | undefined)?.mk_id) : undefined;
   if (offer && input.partner_id && offerPartnerId !== input.partner_id) {
-    throw new DraftError(`Offer ${input.from_offer} is for another partner (${str((offer.partner as MkRecord).customer) ?? offerPartnerId}).`);
+    throw new DraftError(`${sourceLabel} is for another partner (${str((offer.partner as MkRecord).customer) ?? offerPartnerId}).`);
   }
   const partnerId = input.partner_id ?? offerPartnerId;
   if (!partnerId) throw new DraftError("Give partner_id (from search_partners).");
@@ -106,13 +118,14 @@ export async function buildInvoiceDraft(
   const catalog = await loadCatalog(ctx.client, ctx.cache, ctx.today);
   let lines: DraftLine[];
   if (offer) {
-    lines = offerLines(catalog, offer, input.from_offer!);
+    lines = offerLines(catalog, offer, sourceLabel);
+    const links = input.from_offer ? "offer_list" : "sales_order_list";
     const invoiced = (await partnerInvoices()).find((d) =>
-      asArray<MkRecord>(d.offer_list).some((o) => str(o.mk_id) === str(offer.mk_id) || str(o.count_code) === str(offer.count_code)),
+      asArray<MkRecord>(d[links]).some((o) => str(o.mk_id) === str(offer.mk_id) || str(o.count_code) === str(offer.count_code)),
     );
-    if (invoiced) warnings.push(`Offer ${input.from_offer} already has an invoice: ${str(invoiced.count_code) ?? str(invoiced.mk_id)}.`);
+    if (invoiced) warnings.push(`${sourceLabel} already has an invoice: ${str(invoiced.count_code) ?? str(invoiced.mk_id)}.`);
   } else {
-    if (!input.lines?.length) throw new DraftError("An invoice needs at least one product line, or from_offer.");
+    if (!input.lines?.length) throw new DraftError("An invoice needs at least one product line, or from_offer / from_order.");
     const fallback = foreignInvoice ? await zeroTax(catalog, partnerInvoices) : undefined;
     lines = input.lines.map((line, i) => productLine(catalog, line, i, fallback));
   }
@@ -182,7 +195,7 @@ export async function buildInvoiceDraft(
     currency_code: "EUR",
     ...(input.title ? { title: input.title } : {}),
     ...(note ? { notes: note } : {}),
-    ...(offer ? { offer_list: [{ count_code: str(offer.count_code) }] } : {}),
+    ...(offer ? { [input.from_offer ? "offer_list" : "sales_order_list"]: [{ count_code: str(offer.count_code) }] } : {}),
     product_list: productListPayload(lines),
   };
 
@@ -201,43 +214,52 @@ export async function buildInvoiceDraft(
     summary: "",
   });
   payload.document_change_log_notes = `${CHANGE_LOG_PREFIX} ${draft.id}`;
-  const info: InvoiceInfo = { due_date: dueDate, due_from: dueFrom, service_from: input.service_from, service_to: serviceTo, from_offer: offer ? str(offer.count_code) : undefined };
+  const info: InvoiceInfo = {
+    due_date: dueDate,
+    due_from: dueFrom,
+    service_from: input.service_from,
+    service_to: serviceTo,
+    from_offer: input.from_offer && offer ? str(offer.count_code) : undefined,
+    from_order: input.from_order && offer ? str(offer.count_code) : undefined,
+  };
   draft.summary = summarize(draft, { ...info, title: input.title, note }, ctx.installation);
   return { draft, warnings, info };
 }
 
-async function loadOffer(ctx: BuildContext, number: string): Promise<MkRecord> {
-  const id = await findDocumentIdByNumber(ctx.client, "sales_offer", number);
-  if (!id) throw new DraftError(`No offer ${number} in Metakocka. Find it with search_documents (doc_type sales_offer) and use its number.`);
-  const offer = await getDocument(ctx.client, "sales_offer", id);
-  if ((str(offer.currency_code) ?? "EUR") !== "EUR") throw new DraftError(`Offer ${number} is in ${str(offer.currency_code)}; only EUR is supported.`);
-  return offer;
+/** The offer or sales order an invoice is made from. */
+async function loadSource(ctx: BuildContext, docType: "sales_offer" | "sales_order", number: string): Promise<MkRecord> {
+  const what = docType === "sales_offer" ? "offer" : "sales order";
+  const id = await findDocumentIdByNumber(ctx.client, docType, number);
+  if (!id) throw new DraftError(`No ${what} ${number} in Metakocka. Find it with search_documents (doc_type ${docType}) and use its number.`);
+  const doc = await getDocument(ctx.client, docType, id);
+  if ((str(doc.currency_code) ?? "EUR") !== "EUR") throw new DraftError(`The ${what} ${number} is in ${str(doc.currency_code)}; only EUR is supported.`);
+  return doc;
 }
 
-/** The offer's lines as they are on the offer: product, quantity, price, discount and tax code. */
+/** The offer's (or order's) lines as they are on it: product, quantity, price, discount and tax code. `number` names it, e.g. "Offer 4/2026". */
 function offerLines(catalog: Map<string, CatalogProduct>, offer: MkRecord, number: string): DraftLine[] {
   const rates = new Map<string, number>();
   for (const p of catalog.values()) if (p.taxCode && p.taxRatePercent !== undefined) rates.set(p.taxCode, p.taxRatePercent);
   const lines = asArray<MkRecord>(offer.product_list);
-  if (!lines.length) throw new DraftError(`Offer ${number} has no lines.`);
+  if (!lines.length) throw new DraftError(`${number} has no lines.`);
   return lines.map((l, i) => {
     const n = i + 1;
     const product = catalog.get(str(l.mk_id) ?? "");
     if (!product) {
       throw new DraftError(
-        `Offer ${number}, line ${n} (${str(l.name) ?? "?"}) is not a product from the catalogue, and Metakocka's API takes only products. ` +
+        `${number}, line ${n} (${str(l.name) ?? "?"}) is not a product from the catalogue, and Metakocka's API takes only products. ` +
           "Make the invoice from products instead (lines), or in Metakocka.",
       );
     }
-    if (!product.active) throw new DraftError(`Offer ${number}, line ${n}: ${product.name} is not active in Metakocka any more.`);
+    if (!product.active) throw new DraftError(`${number}, line ${n}: ${product.name} is not active in Metakocka any more.`);
     const taxCode = str(l.tax);
     const taxRatePercent = taxCode === undefined ? undefined : rates.get(taxCode);
     if (!taxCode || taxRatePercent === undefined) {
-      throw new DraftError(`Offer ${number}, line ${n}: tax code ${taxCode ?? "(none)"} is not used by any product's price list, so its rate is unknown.`);
+      throw new DraftError(`${number}, line ${n}: tax code ${taxCode ?? "(none)"} is not used by any product's price list, so its rate is unknown.`);
     }
     const quantity = num(l.amount);
     const price = num(l.price);
-    if (!quantity || quantity <= 0 || price === undefined) throw new DraftError(`Offer ${number}, line ${n}: quantity or price is missing.`);
+    if (!quantity || quantity <= 0 || price === undefined) throw new DraftError(`${number}, line ${n}: quantity or price is missing.`);
     return priceLine({ product, quantity, price, discountPercent: num(l.discount) ?? 0, taxCode, taxRatePercent });
   });
 }
@@ -271,6 +293,7 @@ function summarize(
       ? {
           head: foreign ? "Ustvari TUJI RAČUN (neizdan) za" : "Ustvari RAČUN (neizdan) za",
           offer: "Iz ponudbe",
+          order: "Iz prodajnega naročila",
           title: "Naziv",
           note: "Opomba",
           date: "Datum",
@@ -280,6 +303,7 @@ function summarize(
       : {
           head: foreign ? "Create a FOREIGN INVOICE (not issued) for" : "Create an INVOICE (not issued) for",
           offer: "From offer",
+          order: "From sales order",
           title: "Title",
           note: "Note",
           date: "Dated",
@@ -291,6 +315,7 @@ function summarize(
     `${t.head} ${d.partner.name}${d.partner.taxId ? ` (${d.partner.taxId})` : ""}`,
     d.partner.address,
     ...(extra.from_offer ? [`${t.offer}: ${extra.from_offer}`] : []),
+    ...(extra.from_order ? [`${t.order}: ${extra.from_order}`] : []),
     ...(extra.title ? [`${t.title}: ${extra.title}`] : []),
     ...(extra.note ? [`${t.note}: ${oneLine(extra.note)}`] : []),
     "",

@@ -59,6 +59,18 @@ export interface Draft {
   summary: string;
   /** A file to attach once the document is saved (purchase invoices: the supplier's PDF). Never logged. */
   attachment?: { fileName: string; dataB64: string; bytes: number; attached?: boolean };
+  /** A change to an existing document (payment, status): which one, and what it looked like when drafted. */
+  target?: {
+    docType: string;
+    mkId: string;
+    number?: string;
+    /** Payments: sum_paid when drafted, and how much the payment changes it (negative for a refund). */
+    paidBefore?: number;
+    paidChange?: number;
+    /** Status changes: the status when drafted, and the new one. */
+    statusBefore?: string;
+    status?: string;
+  };
   /** Set once committed. */
   result?: { mkId?: string; number?: string; /** A new partner's address. */ addressId?: string };
 }

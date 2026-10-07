@@ -62,6 +62,8 @@ interface FakeOptions {
   documents?: Record<string, Record<string, unknown>>;
   /** Products in the catalogue (default PRODUCTS); add_product adds to it. */
   products?: Record<string, unknown>[];
+  /** More endpoints, or replacements for the ones above. */
+  handlers?: Record<string, Handler>;
 }
 
 /** A Metakocka that knows one partner and a small catalogue, and stores offers it is given. */
@@ -101,6 +103,7 @@ function metakocka(o: FakeOptions = {}) {
       return { opr_code: "0", ...(o.stored ? o.stored(put) : storedFrom(put)) };
     },
     search: o.search ?? (() => ({ opr_code: "0", result_all_records: "0", result: [] })),
+    ...o.handlers,
   };
   const fake = fakeMetakocka(handlers);
   return { ...fake, saved, partners, products, puts: () => fake.calls.filter((c) => c.endpoint === "put_document") };
@@ -199,7 +202,9 @@ describe("write tools are opt-in", () => {
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_PURCHASE_INVOICES: "true" })?.docTypes).toEqual(["purchase_bill_domestic", "purchase_bill_foreign"]);
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "partners,products" })?.docTypes).toEqual(["partner", "product"]);
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_PARTNERS: "true", METAKOCKA_WRITE_PRODUCTS: "false" })?.docTypes).toEqual(["partner"]);
-    expect(() => writeSettingsFromEnv({ METAKOCKA_WRITE: "offers,orders" })).toThrow(ConfigError);
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "payments,orders" })?.docTypes).toEqual(["payment", "sales_order", "order_status"]);
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE_PAYMENTS: "true", METAKOCKA_WRITE_ORDERS: "true" })?.docTypes).toEqual(["payment", "sales_order", "order_status"]);
+    expect(() => writeSettingsFromEnv({ METAKOCKA_WRITE: "offers,order" })).toThrow(ConfigError);
     // The Claude Desktop extension's checkboxes.
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "false", METAKOCKA_WRITE_CONFIRM: "true" })).toBeUndefined();
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "true", METAKOCKA_WRITE_CONFIRM: "true" })).toMatchObject({ docTypes: ["sales_offer"], confirm: "client" });
@@ -1030,3 +1035,234 @@ function parseDraft(r: Awaited<ReturnType<Client["callTool"]>>) {
   const body = parse(r);
   return { body, text: typeof body === "string" ? body : JSON.stringify(body) };
 }
+
+describe("sales orders", () => {
+  const ORDERS: WriteSettings = { docTypes: ["sales_bill_domestic", "sales_order", "order_status"], confirm: "never", timeoutMs: 120_000 };
+  const ORDER = { doc_type: "sales_order", partner_id: "400068941553", lines: [{ product_id: "P1", quantity: 2 }] };
+
+  it("drafts and saves a sales order with the customer's order number and delivery date", async () => {
+    const fake = metakocka();
+    const { client } = await connect(fake, { write: quiet(ORDERS) });
+    expect(client.getInstructions()).toMatch(/can create sales orders \(prodajno naročilo\) and invoices \(račun, saved not issued; also from an offer or order\)/);
+    expect(parse((await draft(client, { ...ORDER, delivery_date: "2026-10-01" })).result)).toMatch(/delivery_date is in the past/);
+    expect(parse((await draft(client, { ...ORDER, due_days: 5 })).result)).toMatch(/due_days: not for sales_order/);
+    const { body } = await draft(client, { ...ORDER, buyer_order: "PO-77", delivery_date: "2026-10-20", title: "Jesen" });
+    expect(body.summary).toBe(
+      [
+        "Ustvari PRODAJNO NAROČILO za ACME d.o.o. (SI12345678)",
+        "Glavna 1, 1000 Ljubljana, Slovenia",
+        "Naročilo kupca: PO-77",
+        "Naziv: Jesen",
+        "",
+        "Postavke:",
+        "  1. 2 × Svetovanje à 35,00 € = 70,00 €",
+        "",
+        "Osnova: 70,00 €",
+        "DDV: 15,40 €",
+        "Skupaj z DDV: 85,40 €",
+        "",
+        "Datum 2026-10-05 · rok dobave 2026-10-20",
+      ].join("\n"),
+    );
+    const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
+    expect(r).toMatchObject({ status: "created", warnings: [] });
+    const { company_id: _c, secret_key: _s, ...sent } = fake.puts()[0]!.body;
+    expect(sent).toEqual({
+      doc_type: "sales_order",
+      doc_date: "05.10.2026",
+      partner: { mk_id: "400068941553", mk_address_id: "400079138037" },
+      currency_code: "EUR",
+      title: "Jesen",
+      buyer_order: "PO-77",
+      delivery_deadline: "20.10.2026",
+      product_list: [{ mk_id: "P1", code: "SVC-H", count_code: "1", amount: "2", price: "35", discount: "0", tax: "EX4" }],
+      document_change_log_notes: `metakocka-mcp ${body.draft_id}`,
+    });
+  });
+
+  it("invoices a sales order, linked to it through sales_order_list", async () => {
+    const order = {
+      mk_id: "SO1",
+      doc_type: "sales_order",
+      count_code: "1/2026",
+      partner: { mk_id: "400068941553", mk_address_id: "400079138037", customer: "ACME d.o.o." },
+      currency_code: "EUR",
+      product_list: [{ mk_id: "P2", code: "SVC-D", amount: "1", price: "20", discount: "0", tax: "EX4" }],
+    };
+    const fake = metakocka({
+      documents: { SO1: order },
+      search: (body) =>
+        body.doc_type === "sales_order"
+          ? { opr_code: "0", result: body.query === "1/2026" ? [order] : [] }
+          : { opr_code: "0", result_all_records: "1", result: [{ partner: { mk_id: "400068941553" }, count_code: "RD-1/2026", doc_date: "2026-09-01+02:00", duo_payment: "2026-09-09+02:00", sales_order_list: [{ count_code: "1/2026" }] }] },
+    });
+    const { client } = await connect(fake, { write: quiet(ORDERS) });
+    const { body } = await draft(client, { doc_type: "sales_bill_domestic", from_order: "1/2026" });
+    expect(body).toMatchObject({ from_order: "1/2026", totals: { gross: 24.4 } });
+    expect(body.warnings).toEqual(["Sales order 1/2026 already has an invoice: RD-1/2026."]);
+    expect(body.summary).toMatch(/\nIz prodajnega naročila: 1\/2026\n/);
+    await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } });
+    const sent = fake.puts()[0]!.body;
+    expect(sent.sales_order_list).toEqual([{ count_code: "1/2026" }]);
+    expect(sent.offer_list).toBeUndefined();
+    expect(parse((await draft(client, { doc_type: "sales_bill_domestic", from_order: "1/2026", from_offer: "4/2026" })).result)).toMatch(/either from_offer or from_order/);
+
+    // Without orders turned on, invoices can't be made from them.
+    const invoicesOnly = await connect(metakocka(), { write: quiet({ ...ORDERS, docTypes: ["sales_bill_domestic"] }) });
+    const tool = (await invoicesOnly.client.listTools()).tools.find((t) => t.name === "draft_document")!;
+    expect(Object.keys((tool.inputSchema as { properties: object }).properties)).not.toContain("from_order");
+  });
+
+  it("changes an order's status, checking it against the statuses in use and reading it back", async () => {
+    let status: string | undefined = "Novo naročilo";
+    const changes: Body[] = [];
+    const fake = metakocka({
+      search: (body) =>
+        body.query === "PP-9"
+          ? { opr_code: "0", result: [{ mk_id: "SO9", count_code: "PP-9" }] }
+          : { opr_code: "0", result: [{ count_code: "PP-1", status_code: "Novo naročilo" }, { count_code: "PP-2", status_code: "Odpremljen" }] },
+      handlers: {
+        get_document: () => ({ opr_code: "0", mk_id: "SO9", count_code: "PP-9", status_code: status, partner: { mk_id: "400068941553", customer: "ACME d.o.o." } }),
+        change_document_status: (body) => {
+          changes.push(body);
+          if (body.status_code === "Izgubljen") return { opr_code: "1", opr_desc: "Dinamični šifrant z vrednostjo ''Izgubljen'' tipa ''Prodajna naročila - status'' mora biti nastavljen" };
+          status = String(body.status_code);
+          return { opr_code: "0" };
+        },
+      },
+    });
+    const { client } = await connect(fake, { write: quiet(ORDERS) });
+    expect(parse(await client.callTool({ name: "draft_order_status", arguments: { number: "PP-9", status: "novo naročilo" } }))).toMatch(/already has the status Novo naročilo/);
+
+    const bad = parse(await client.callTool({ name: "draft_order_status", arguments: { number: "PP-9", status: "Izgubljen" } }));
+    expect(bad.warnings[0]).toMatch(/statuses in use: Novo naročilo, Odpremljen/);
+    const refused = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: bad.draft_id } }));
+    expect(refused).toMatchObject({ status: "rejected" });
+    expect(refused.message).toMatch(/Prodajna naročila - status\), spelled exactly/);
+
+    const ok = parse(await client.callTool({ name: "draft_order_status", arguments: { number: "PP-9", status: "Odpremljen" } }));
+    expect(ok.warnings).toBeUndefined();
+    expect(ok.summary).toBe("Spremeni STATUS prodajnega naročila PP-9 (ACME d.o.o.)\nNovo naročilo → Odpremljen");
+    const done = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: ok.draft_id } }));
+    expect(done).toMatchObject({ status: "created", number: "PP-9", order_status: "Odpremljen", warnings: [] });
+    const { company_id: _c, secret_key: _s, ...sent } = changes.at(-1)!;
+    expect(sent).toEqual({ doc_type: "sales_order", mk_id: "SO9", status_code: "Odpremljen" });
+  });
+});
+
+describe("payments", () => {
+  const PAYMENTS: WriteSettings = { docTypes: ["payment"], confirm: "client", timeoutMs: 120_000 };
+
+  /** A Metakocka holding one invoice whose payments put_transaction adds to. */
+  function withInvoice(over: Record<string, unknown> = {}, { lose = false } = {}) {
+    const invoice = {
+      mk_id: "INV2",
+      doc_type: "sales_bill_domestic",
+      count_code: "RD-2/2026",
+      doc_date: "2026-09-20+02:00",
+      currency_code: "EUR",
+      partner: { mk_id: "400068941553", customer: "ACME d.o.o." },
+      sum_all: "2000",
+      sum_paid: "500",
+      mark_paid: [{ payment_type: "Transakcijski račun", date: "2026-09-25+02:00", amount: "500", payment_tip: "Plačilo" }],
+      ...over,
+    } as Record<string, unknown>;
+    const transactions: Body[] = [];
+    const fake = metakocka({
+      search: (body) =>
+        body.query === "RD-2/2026"
+          ? { opr_code: "0", result: [{ mk_id: "INV2", count_code: "RD-2/2026" }] }
+          : { opr_code: "0", result: [{ mark_paid: [{ payment_type: "Gotovina" }, { payment_type: "Kartica" }, { payment_type: "Kartica" }] }] },
+      handlers: {
+        get_document: (body) => {
+          expect(body.show_payment_detail).toBe("true");
+          return { opr_code: "0", ...invoice };
+        },
+        put_transaction: (body) => {
+          transactions.push(body);
+          const change = (body.payment_mode === "return" ? -1 : 1) * Number(body.price);
+          invoice.sum_paid = String(Number(invoice.sum_paid ?? 0) + change);
+          if (lose) return new Response("", { status: 502 });
+          return { opr_code: "0" };
+        },
+      },
+    });
+    return { fake, transactions, invoice };
+  }
+
+  it("drafts the open amount with the usual payment type, saves it once and checks the paid amount", async () => {
+    const { fake, transactions } = withInvoice();
+    const { client, prompts } = await connect(fake, { write: quiet(PAYMENTS) });
+    expect(client.getInstructions()).toMatch(/it can record payments\. draft_payment records a payment/);
+    const body = parse(await client.callTool({ name: "draft_payment", arguments: { doc_type: "sales_bill_domestic", number: "RD-2/2026", date: "2026-10-03" } }));
+    expect(body.summary).toBe(
+      [
+        "Zabeleži PLAČILO 1500,00 € na RD-2/2026 (ACME d.o.o.)",
+        "Datum 2026-10-03 · Transakcijski račun",
+        "",
+        "Skupaj: 2000,00 € · plačano doslej: 500,00 € · odprto po vnosu: 0,00 €",
+      ].join("\n"),
+    );
+    expect(transactions).toHaveLength(0);
+    const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
+    expect(prompts).toHaveLength(1);
+    expect(r).toMatchObject({ status: "created", number: "RD-2/2026", paid_now: 2000, warnings: [] });
+    const { company_id: _c, secret_key: _s, ...sent } = transactions[0]!;
+    expect(sent).toEqual({
+      doc_type: "sales_bill_domestic",
+      mk_id: "INV2",
+      payment_mode: "payment",
+      payment_type: "Transakcijski račun",
+      date: "03.10.2026",
+      price: "1500.00",
+    });
+    expect(parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }))).toMatchObject({ status: "already_created" });
+    expect(transactions).toHaveLength(1);
+  });
+
+  it("refuses more than is open, a paid invoice, a future date, and a prepayment on an invoice", async () => {
+    const { fake } = withInvoice();
+    const { client } = await connect(fake, { write: quiet(PAYMENTS) });
+    const call = async (args: Record<string, unknown>) => parse(await client.callTool({ name: "draft_payment", arguments: { doc_type: "sales_bill_domestic", number: "RD-2/2026", ...args } }));
+    expect(await call({ amount: 1600 })).toMatch(/has 1500 open.*can't be more than that/);
+    expect(await call({ date: "2026-10-06" })).toMatch(/can't be in the future/);
+    expect(await call({ mode: "prepayment" })).toMatch(/prepayment \(avans\) goes on an offer or a sales order/);
+    expect(await call({ mode: "return", amount: 600 })).toMatch(/Only 500 has been paid/);
+    expect(await call({ number: "RD-99/2026" })).toMatch(/No sales_bill_domestic with number RD-99\/2026/);
+
+    const paid = withInvoice({ sum_paid: "2000" });
+    const { client: c2 } = await connect(paid.fake, { write: quiet(PAYMENTS) });
+    expect(parse(await c2.callTool({ name: "draft_payment", arguments: { doc_type: "sales_bill_domestic", number: "RD-2/2026" } }))).toMatch(/already paid in full/);
+  });
+
+  it("without earlier payments on the document takes the most common type from others, and warns of a likely duplicate", async () => {
+    const { fake } = withInvoice({ mark_paid: [{ payment_type: "", date: "2026-10-05+02:00", amount: "100,00" }] });
+    const { client } = await connect(fake, { write: quiet(PAYMENTS) });
+    const body = parse(await client.callTool({ name: "draft_payment", arguments: { doc_type: "sales_bill_domestic", number: "RD-2/2026", amount: 100, note: "nakazilo" } }));
+    expect(body.summary).toMatch(/^Zabeleži PLAČILO 100,00 € na RD-2\/2026 \(ACME d.o.o.\)\nDatum 2026-10-05 · Kartica\nOpomba: nakazilo\n/);
+    expect(body.warnings).toEqual(["RD-2/2026 already has a payment of 100 on 2026-10-05. Make sure this is another one."]);
+  });
+
+  it("refuses to save when the paid amount changed since drafting", async () => {
+    const { fake, invoice, transactions } = withInvoice();
+    const { client } = await connect(fake, { write: quiet({ ...PAYMENTS, confirm: "never" }) });
+    const body = parse(await client.callTool({ name: "draft_payment", arguments: { doc_type: "sales_bill_domestic", number: "RD-2/2026" } }));
+    invoice.sum_paid = "2000";
+    const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
+    expect(r.status).toBe("rejected");
+    expect(r.message).toMatch(/paid amount of RD-2\/2026 changed since this was drafted/);
+    expect(transactions).toHaveLength(0);
+  });
+
+  it("a lost answer is never retried; the next commit finds the payment on the document", async () => {
+    const { fake, transactions } = withInvoice({}, { lose: true });
+    const { client } = await connect(fake, { write: quiet({ ...PAYMENTS, confirm: "never" }) });
+    const body = parse(await client.callTool({ name: "draft_payment", arguments: { doc_type: "sales_bill_domestic", number: "RD-2/2026", amount: 200 } }));
+    const first = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
+    expect(first.status).toBe("unknown");
+    expect(transactions).toHaveLength(1);
+    const second = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
+    expect(second).toMatchObject({ status: "created", paid_now: 700, warnings: ["The save had not answered; the payment was found on the document afterwards."] });
+    expect(transactions).toHaveLength(1);
+  });
+});

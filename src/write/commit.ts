@@ -10,10 +10,12 @@ import { fromMkDate } from "../dates.js";
 import { asArray, num, str } from "../util.js";
 import type { Draft, DraftStore } from "./drafts.js";
 import type { Journal } from "./journal.js";
+import { commitPayment, resolveUnknownPayment } from "./payment.js";
 import { commitRecord, resolveUnknownRecord } from "./records.js";
-import { isRecordType, type RecordType, type WritableDocType } from "./settings.js";
+import { isRecordType, type NewDocumentType } from "./settings.js";
+import { commitStatus, resolveUnknownStatus } from "./status.js";
 
-type DocumentType = Exclude<WritableDocType, RecordType>;
+type DocumentType = NewDocumentType;
 
 export interface CommitContext {
   client: MetakockaClient;
@@ -25,12 +27,14 @@ export interface CommitContext {
 }
 
 export type CommitOutcome =
-  | { status: "created"; number?: string; mk_id: string; total?: number; currency?: string; address_id?: string; warnings: string[] }
+  | { status: "created"; number?: string; mk_id: string; total?: number; currency?: string; address_id?: string; paid_now?: number; order_status?: string; warnings: string[] }
   | { status: "rejected"; message: string }
   | { status: "unknown"; message: string };
 
 export async function commitDraft(ctx: CommitContext, draft: Draft): Promise<CommitOutcome> {
   if (isRecordType(draft.docType)) return commitRecord(ctx, draft);
+  if (draft.docType === "payment") return commitPayment(ctx, draft);
+  if (draft.docType === "order_status") return commitStatus(ctx, draft);
   const base = { draft_id: draft.id, doc_type: draft.docType, installation: ctx.installation };
   draft.status = "committing";
   await ctx.journal({ ...base, event: "attempt", payload: draft.payload });
@@ -64,6 +68,8 @@ export async function commitDraft(ctx: CommitContext, draft: Draft): Promise<Com
 export async function resolveUnknown(ctx: CommitContext, draft: Draft): Promise<CommitOutcome | { status: "not_found" } | { status: "ambiguous"; candidates: string[] }> {
   const docType = draft.docType;
   if (isRecordType(docType)) return resolveUnknownRecord(ctx, draft);
+  if (docType === "payment") return resolveUnknownPayment(ctx, draft);
+  if (docType === "order_status") return resolveUnknownStatus(ctx, draft);
   const { documents } = await searchDocuments(ctx.client, {
     docType,
     dateFrom: draft.docDate,

@@ -1,6 +1,7 @@
 /**
- * Opt-in tools that create documents in Metakocka (METAKOCKA_WRITE): offers, invoices and received invoices,
- * and register entries: partners and products. draft_partner / draft_product draft the latter.
+ * Opt-in tools that create documents in Metakocka (METAKOCKA_WRITE): offers, sales orders, invoices and received
+ * invoices; register entries: partners and products (draft_partner / draft_product); and changes to existing
+ * documents: payments (draft_payment) and a sales order's status (draft_order_status).
  * draft_document builds and checks a document without saving it;
  * commit_document saves exactly that draft, after the user confirms it in
  * their client (see WriteSettings.confirm); discard_draft drops it.
@@ -14,10 +15,12 @@ import { DraftStore, type Draft } from "../write/drafts.js";
 import { createJournal, type Journal } from "../write/journal.js";
 import { DraftError, sameSummary } from "../write/document.js";
 import { buildInvoiceDraft, type InvoiceInfo, type InvoiceInput } from "../write/invoice.js";
-import { buildOfferDraft, type OfferInput } from "../write/offer.js";
+import { buildOfferDraft, buildOrderDraft, type OfferInput, type OrderInput } from "../write/offer.js";
+import { buildPaymentDraft, PAYABLE_TYPES, type PaymentInput } from "../write/payment.js";
+import { buildStatusDraft } from "../write/status.js";
 import { buildPurchaseDraft, type PurchaseInfo, type PurchaseInput } from "../write/purchase.js";
 import { buildPartnerDraft, buildProductDraft } from "../write/records.js";
-import { INVOICE_TYPES, isRecordType, PURCHASE_TYPES, type WriteSettings } from "../write/settings.js";
+import { INVOICE_TYPES, isNewDocumentType, PURCHASE_TYPES, type WriteSettings } from "../write/settings.js";
 import { compact } from "../util.js";
 import { run, type ToolContext } from "./shared.js";
 
@@ -60,19 +63,23 @@ const COMMIT_CONFIRMATION: Record<WriteSettings["confirm"], string> = {
 export function registerWriteTools(server: McpServer, ctx: ToolContext, write: WriteContext): void {
   const { settings, drafts, journal } = write;
 
-  const documentTypes = settings.docTypes.filter((t) => !isRecordType(t));
+  const documentTypes = settings.docTypes.filter(isNewDocumentType);
   const partners = settings.docTypes.includes("partner");
   const products = settings.docTypes.includes("product");
+  const payments = settings.docTypes.includes("payment");
+  const orders = settings.docTypes.includes("sales_order");
   const offers = settings.docTypes.includes("sales_offer");
   const invoices = settings.docTypes.some((t) => INVOICE_TYPES.includes(t));
   const purchases = settings.docTypes.some((t) => PURCHASE_TYPES.includes(t));
   const what = [
     offers && "an offer (ponudba / predračun)",
+    orders && "a sales order (prodajno naročilo)",
     invoices && "an invoice (račun, domestic or foreign)",
     purchases && "a received invoice (prejeti račun) from a supplier's invoice",
   ].filter(Boolean);
   const docTypeHelp = [
     offers && "sales_offer = ponudba (also used as predračun)",
+    orders && "sales_order = prodajno naročilo",
     invoices && "sales_bill_domestic = račun for a domestic partner, sales_bill_foreign = tuji račun for a foreign partner",
     purchases && "purchase_bill_domestic / purchase_bill_foreign = prejeti račun from a domestic / foreign supplier",
   ].filter(Boolean).join("; ");
@@ -90,17 +97,18 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
   if (documentTypes.length) server.registerTool(
     "draft_document",
     {
-      title: `Draft a document (${[offers && "offer", invoices && "invoice", purchases && "received invoice"].filter(Boolean).join(", ")})`,
+      title: `Draft a document (${[offers && "offer", orders && "sales order", invoices && "invoice", purchases && "received invoice"].filter(Boolean).join(", ")})`,
       description:
         `Prepare ${what.join(", or ")} in Metakocka WITHOUT saving it. Everything is linked to records that ` +
         "already exist: the partner by its id (from search_partners) and products by their id (from search_products). " +
         "This tool never creates partners or products; if one is missing, tell the user to add it in Metakocka. " +
-        (offers || invoices
-          ? `${purchases ? `On ${[offers && "offers", invoices && "invoices"].filter(Boolean).join(" and ")}, prices` : "Prices"} and VAT come from Metakocka's price list unless a price is given. `
+        (offers || orders || invoices
+          ? `${purchases ? `On ${[offers && "offers", orders && "orders", invoices && "invoices"].filter(Boolean).join(" and ")}, prices` : "Prices"} and VAT come from Metakocka's price list unless a price is given. `
           : "") +
+        (orders ? "A sales order can carry the customer's own order number (buyer_order) and a delivery date. " : "") +
         (invoices
           ? "Invoices are saved NOT issued: the user checks and issues (prints) them in Metakocka; they move no stock. " +
-            "An invoice can also be made from an offer (from_offer: its lines, partner and a link to it). The payment term " +
+            `An invoice can also be made from an offer (from_offer: its lines, partner and a link to it)${orders ? " or a sales order (from_order)" : ""}. The payment term ` +
             "comes from the partner (its term in Metakocka, else its last invoice) unless given. Foreign invoices take only " +
             "lines without VAT and, unless a note is given, the VAT note of the partner's last foreign invoice. "
           : "") +
@@ -120,7 +128,7 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           .string()
           .min(1)
           .optional()
-          .describe(`The partner's Metakocka id (mk_id, the \`id\` from search_partners).${invoices ? " With from_offer it can be left out." : ""}`),
+          .describe(`The partner's Metakocka id (mk_id, the \`id\` from search_partners).${invoices ? ` With from_offer${orders ? " / from_order" : ""} it can be left out.` : ""}`),
         address_id: z
           .string()
           .optional()
@@ -151,10 +159,17 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           .min(1)
           .max(50)
           .optional(),
-        ...(offers || invoices ? { title: z.string().max(100).optional().describe("Document title (naziv).") } : {}),
+        ...(offers || orders || invoices ? { title: z.string().max(100).optional().describe("Document title (naziv).") } : {}),
         note: z.string().max(1000).optional().describe("Note on the document."),
         ...(offers ? { valid_days: z.number().int().min(1).max(365).optional().describe("Offers: how many days the offer is valid (default 30).") } : {}),
         ...(invoices ? { from_offer: z.string().min(1).optional().describe("Invoices: number of the offer to invoice (e.g. \"4/2026\"), instead of lines.") } : {}),
+        ...(invoices && orders ? { from_order: z.string().min(1).optional().describe("Invoices: number of the sales order to invoice, instead of lines.") } : {}),
+        ...(orders
+          ? {
+              buyer_order: z.string().max(30).optional().describe("Sales orders: the customer's own order number (naročilo kupca)."),
+              delivery_date: z.string().optional().describe("Sales orders: delivery deadline (rok dobave), YYYY-MM-DD."),
+            }
+          : {}),
         ...(invoices || purchases
           ? {
               service_from: z.string().optional().describe(`${forDates}: first day of the service period (YYYY-MM-DD), if it is a period.`),
@@ -188,12 +203,15 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           installation: installation.isDefault ? undefined : installation.host,
         };
         const a = args as Record<string, unknown> & { doc_type: string; lines?: Record<string, unknown>[] };
-        const kind = a.doc_type === "sales_offer" ? "offer" : a.doc_type.startsWith("sales_bill_") ? "invoice" : "purchase";
+        const kind = a.doc_type === "sales_offer" ? "offer" : a.doc_type === "sales_order" ? "order" : a.doc_type.startsWith("sales_bill_") ? "invoice" : "purchase";
         // Fields that belong to other kinds of documents are refused rather than silently ignored.
         const allowed: Record<string, readonly string[]> = {
           valid_days: ["offer"],
-          title: ["offer", "invoice"],
+          title: ["offer", "order", "invoice"],
           from_offer: ["invoice"],
+          from_order: ["invoice"],
+          buyer_order: ["order"],
+          delivery_date: ["order"],
           service_from: ["invoice", "purchase"],
           service_to: ["invoice", "purchase"],
           due_days: ["invoice", "purchase"],
@@ -213,6 +231,9 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           if (kind === "offer") {
             if (!a.partner_id) throw new DraftError("Give partner_id (from search_partners).");
             built = await buildOfferDraft(buildCtx, { ...(a as unknown as OfferInput), lines: (a.lines ?? []) as OfferInput["lines"] });
+          } else if (kind === "order") {
+            if (!a.partner_id) throw new DraftError("Give partner_id (from search_partners).");
+            built = await buildOrderDraft(buildCtx, { ...(a as unknown as OrderInput), lines: (a.lines ?? []) as OrderInput["lines"] });
           } else if (kind === "invoice") {
             built = await buildInvoiceDraft(buildCtx, a as unknown as InvoiceInput);
           } else {
@@ -301,6 +322,57 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
     );
   }
 
+  if (payments) {
+    server.registerTool(
+      "draft_payment",
+      {
+        title: "Draft a payment",
+        description:
+          "Prepare a payment on a document that already exists in Metakocka WITHOUT saving it: a customer paid an invoice " +
+          "(mark it paid), we paid a supplier's invoice, a prepayment (avans) on an offer or sales order, or a refund. " +
+          "Identify the document by its number (search_documents) and type. The amount defaults to everything still open; " +
+          "it can't be more than that. The payment type defaults to the one the company's earlier payments use (usually " +
+          "\"Transakcijski račun\" for a bank transfer). Check the bank statement (get_bank_statements) first when the user " +
+          "isn't sure the money came in. Returns a draft_id and a summary: show it, then commit_document.",
+        inputSchema: z.object({
+          doc_type: z.enum(PAYABLE_TYPES).describe("Type of the paid document, e.g. sales_bill_domestic (izdani račun), purchase_bill_domestic (prejeti račun)."),
+          number: z.string().min(1).optional().describe("Document number as shown in Metakocka, e.g. \"RD-2/2026\"."),
+          id: z.string().min(1).optional().describe("Or the document's Metakocka id."),
+          amount: z.number().positive().max(100_000_000).optional().describe("Amount in EUR; default: everything still open (for a refund: everything paid)."),
+          date: z.string().optional().describe("When it was paid, YYYY-MM-DD; default today."),
+          mode: z.enum(["payment", "prepayment", "return"]).default("payment").describe("payment (plačilo), prepayment (avans, on offers and orders) or return (vračilo)."),
+          payment_type: z.string().max(100).optional().describe('As in Metakocka, e.g. "Transakcijski račun", "Gotovina", "Kartica"; default: the usual one.'),
+          cash_register: z.string().max(100).optional().describe("Cash payments with several cash registers: which one."),
+          note: z.string().max(100).optional(),
+          language: z.enum(["sl", "en"]).default("sl").describe("Language of the summary the user confirms."),
+        }),
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async (args) => run(async () => recordAnswer(await buildPaymentDraft(recordContext(), args as PaymentInput))),
+    );
+  }
+
+  if (orders) {
+    server.registerTool(
+      "draft_order_status",
+      {
+        title: "Draft a sales order status change",
+        description:
+          "Prepare a new status for a sales order (e.g. \"Odpremljen\" / shipped) WITHOUT saving it. Statuses are the " +
+          "company's own, from Metakocka's register: use one exactly as the user or other orders (search_documents) name it. " +
+          "Returns a draft_id and a summary: show it, then commit_document.",
+        inputSchema: z.object({
+          number: z.string().min(1).optional().describe("The sales order's number as shown in Metakocka."),
+          id: z.string().min(1).optional().describe("Or its Metakocka id."),
+          status: z.string().min(1).max(100).describe("The new status, exactly as in Metakocka."),
+          language: z.enum(["sl", "en"]).default("sl").describe("Language of the summary the user confirms."),
+        }),
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async (args) => run(async () => recordAnswer(await buildStatusDraft(recordContext(), args))),
+    );
+  }
+
   server.registerTool(
     "commit_document",
     {
@@ -342,6 +414,14 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
               return {
                 status: "not_saved",
                 message: "The earlier attempt did not create the document. Call commit_document again to save it (the user confirms again).",
+              };
+            }
+            if (found.status === "ambiguous" && draft.docType === "payment") {
+              return {
+                status: "unknown",
+                message:
+                  `The document's paid amount changed, but not by exactly this payment (${found.candidates.join(", ")}). ` +
+                  "Ask the user to check its payments in Metakocka. Do not save it again; discard_draft when resolved.",
               };
             }
             if (found.status === "ambiguous") {
@@ -428,8 +508,8 @@ function confirmation(draft: Draft) {
       properties: {
         confirm: {
           type: "boolean" as const,
-          title: sl ? "Ustvari dokument v Metakocki" : "Create the document in Metakocka",
-          description: sl ? "Potrdite, da se dokument shrani v Metakocko." : "Confirm to save the document in Metakocka.",
+          title: sl ? "Shrani v Metakocko" : "Save in Metakocka",
+          description: sl ? "Potrdite, da se to shrani v Metakocko." : "Confirm to save this in Metakocka.",
         },
       },
       required: ["confirm"],

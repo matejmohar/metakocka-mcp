@@ -13,6 +13,10 @@ export const WRITABLE_TYPES = {
   purchase_invoices: ["purchase_bill_domestic", "purchase_bill_foreign"],
   partners: ["partner"],
   products: ["product"],
+  /** Payments on existing invoices, offers and orders (put_transaction). */
+  payments: ["payment"],
+  /** Sales orders, invoices from them, and changing an order's status. */
+  orders: ["sales_order", "order_status"],
 } as const;
 export type WritableDocType = (typeof WRITABLE_TYPES)[keyof typeof WRITABLE_TYPES][number];
 export const INVOICE_TYPES: readonly WritableDocType[] = WRITABLE_TYPES.invoices;
@@ -20,6 +24,12 @@ export const PURCHASE_TYPES: readonly WritableDocType[] = WRITABLE_TYPES.purchas
 /** Register entries rather than documents: new partners and products. */
 export type RecordType = "partner" | "product";
 export const isRecordType = (t: WritableDocType): t is RecordType => t === "partner" || t === "product";
+/** Changes to a document that already exists: a payment on it, or a sales order's new status. */
+export type ChangeType = "payment" | "order_status";
+export const isChangeType = (t: WritableDocType): t is ChangeType => t === "payment" || t === "order_status";
+/** New documents, drafted with draft_document and saved with put_document. */
+export type NewDocumentType = Exclude<WritableDocType, RecordType | ChangeType>;
+export const isNewDocumentType = (t: WritableDocType): t is NewDocumentType => !isRecordType(t) && !isChangeType(t);
 
 export interface WriteSettings {
   docTypes: WritableDocType[];
@@ -40,9 +50,9 @@ export interface WriteSettings {
 const DEFAULT_WRITE_TIMEOUT_MS = 120_000;
 
 /**
- * METAKOCKA_WRITE=offers,invoices,purchase_invoices,partners,products (or
- * METAKOCKA_WRITE_OFFERS / _INVOICES / _PURCHASE_INVOICES / _PARTNERS /
- * _PRODUCTS=true, what the Claude Desktop extension's checkboxes set)
+ * METAKOCKA_WRITE=offers,invoices,purchase_invoices,partners,products,payments,orders
+ * (or METAKOCKA_WRITE_OFFERS / _INVOICES / _PURCHASE_INVOICES / _PARTNERS /
+ * _PRODUCTS / _PAYMENTS / _ORDERS=true, what the Claude Desktop extension's checkboxes set)
  * enables the write tools for those documents and registers. Returns
  * undefined when writing is off. Throws ConfigError for values it doesn't
  * understand, so a typo never silently changes what the server may do.
@@ -55,6 +65,8 @@ export function writeSettingsFromEnv(env: NodeJS.ProcessEnv = process.env): Writ
   if (flag(env, "METAKOCKA_WRITE_PURCHASE_INVOICES")) names.push("purchase_invoices");
   if (flag(env, "METAKOCKA_WRITE_PARTNERS")) names.push("partners");
   if (flag(env, "METAKOCKA_WRITE_PRODUCTS")) names.push("products");
+  if (flag(env, "METAKOCKA_WRITE_PAYMENTS")) names.push("payments");
+  if (flag(env, "METAKOCKA_WRITE_ORDERS")) names.push("orders");
   if (!names.length) return undefined;
 
   const docTypes: WritableDocType[] = [];
