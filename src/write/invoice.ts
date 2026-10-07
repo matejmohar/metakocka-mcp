@@ -27,6 +27,7 @@ import {
   type LineInput,
   currencyCode,
   foreignVatWarnings,
+  partnerDiscountNotes,
   type TaxFallback,
 } from "./document.js";
 import type { Draft, DraftLine } from "./drafts.js";
@@ -136,7 +137,8 @@ export async function buildInvoiceDraft(
     if (!input.lines?.length) throw new DraftError("An invoice needs at least one product line, or from_offer / from_order.");
     // Foreign partners: no VAT by default (reverse charge, export); a line's vat_percent charges VAT.
     const foreignTax = partner.foreign ? (await zeroTax(catalog, partnerInvoices)) ?? "unknown" : undefined;
-    lines = input.lines.map((line, i) => productLine(catalog, line, i, { foreignTax, currency }));
+    lines = input.lines.map((line, i) => productLine(catalog, line, i, { foreignTax, currency, partnerDiscounts: partner.discounts }));
+    warnings.push(...partnerDiscountNotes(partner, lines, input.lines, catalog));
   }
   warnings.push(...foreignVatWarnings(partner, lines));
   const totals = totalsOf(lines, currency);

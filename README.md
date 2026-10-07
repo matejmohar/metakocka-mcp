@@ -356,8 +356,10 @@ Payments in particular:
 
 Sales orders in particular:
 
-- **Like offers**: the partner, address and products by id, prices from the price list, plus the customer's order number
-  and delivery date. Foreign partners aren't supported yet.
+- **Like offers**: the partner, address and products by id, prices from the price list, plus the customer's order number,
+  delivery date and delivery type. A different **receiver** (prejemnik) is an existing partner, sent in full with its id
+  (Metakocka would otherwise take the buyer, or create a new partner). Metakocka silently leaves out a delivery type it
+  doesn't know, so the draft checks it against the types in use and the saved order is read back.
 - **Invoice from an order.** *From order 1/2026* takes the order's partner and lines and links the invoice to it.
 - **Status** must be one of the company's own statuses (Šifranti → Prodajna naročila - status), spelled exactly. The API
   can't list them; the statuses on existing orders are offered as hints.
@@ -386,9 +388,14 @@ Foreign partners and currencies:
 - **Labels** register parcels with the delivery service. If the call doesn't answer, the orders' tracking codes are
   checked before anything is printed again.
 - **Messages** are sent the moment you confirm and can't be recalled; a call that doesn't answer is never repeated
-  automatically. Check e-mails with `get_email_events`.
+  automatically. Check e-mails with `get_email_events`. E-mails can carry Metakocka documents as PDF (e.g. the invoice)
+  and, when the server runs on your computer, files from it; the audit log keeps only their names and sizes.
 
-Not supported yet: partners with category discounts, and products with tiered or several prices when changing a price.
+Partner discounts: a partner's discounts per product category (popusti partnerja) apply to lines priced from the price
+list — the best matching category, replacing the price list's own discount only where Metakocka marks the partner
+discount so. Lines with a price given by hand get none, and the draft says when one would have applied.
+
+Not supported yet: products with tiered or several prices when changing a price.
 Lines must be products (Metakocka's API has no description-only lines). Only the fields Metakocka's API allows can be
 changed, and nothing can be deleted.
 

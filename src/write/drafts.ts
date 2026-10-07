@@ -34,6 +34,8 @@ export interface DraftLine {
   net: number;
   tax: number;
   gross: number;
+  /** The category whose partner discount this line got. */
+  partnerDiscount?: string;
 }
 
 export interface DraftTotals {

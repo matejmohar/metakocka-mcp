@@ -278,7 +278,6 @@ describe("draft_document", () => {
       return String(body);
     };
     expect(await err({ partner_id: "999" })).toMatch(/No partner with id 999.*never creates partners/);
-    expect(await err({ partner_id: "DISC" })).toMatch(/partner discounts/);
     expect(await err({ partner_id: "TWO" })).toMatch(/several addresses.*A1: .*Prva 1.*A2: .*Druga 2/);
     expect(await err({ partner_id: "NONE" })).toMatch(/no address/);
     expect(await err({ address_id: "A1" })).toMatch(/does not belong to ACME/);
@@ -1705,5 +1704,101 @@ describe("foreign partners and other currencies", () => {
     entered = [{ count_code: "CN-5", partner: { mk_id: "400068941553" } }];
     expect(await call({ credit_type: "goods", from_invoice: "126-0399", supplier_number: "cn-5" })).toMatch(/already in Metakocka/);
     expect(parse(await client.callTool({ name: "draft_credit_note", arguments: { credit_type: "goods", from_invoice: "126-0399", supplier_number: "X" } }))).toMatch(/only for side purchase/);
+  });
+});
+
+describe("partner discounts per product category", () => {
+  it("applies the partner's best category discount to price-list lines, and says where it didn't", async () => {
+    const tree = (...labels: string[]) => [{ tree_node_label: labels[0], tree_node_list: labels.slice(1).map((l) => ({ tree_node_label: l })) }];
+    const products = [
+      { ...PRODUCTS[0], category_tree_list: tree("Storitve", "Svetovanje") },
+      { ...PRODUCTS[1], category_tree_list: tree("Storitve"), pricelist: priced("EX4", "22", "20", { price_def: { price: "20", tax: "EX4", tax_desc: "22", discount: "5" } }) },
+      { mk_id: "P9", count_code: "9", code: "HW", name: "Strojna oprema", unit: "kos", sales: "true", activated: "true", pricelist: priced(), category_tree_list: tree("Oprema") },
+    ];
+    const discounted = partner({
+      discounts: [
+        { categories: ["Storitve"], discount_percent: "10.00", override_existing: "false" },
+        { categories: "Svetovanje", discount_percent: "15.00", override_existing: "true" },
+      ],
+    });
+    const f = metakocka({ partners: [discounted], products });
+    const { client } = await connect(f, { write: quiet({ docTypes: ["sales_offer"], confirm: "never", timeoutMs: 1000 }) });
+    const { body } = await draft(client, {
+      doc_type: "sales_offer",
+      partner_id: "400068941553",
+      lines: [{ code: "SVC-H", quantity: 1 }, { code: "SVC-D", quantity: 1 }, { code: "HW", quantity: 1 }, { code: "SVC-H", quantity: 1, price: 30 }],
+    });
+    // Svetovanje: the best match (15 %, Svetovanje); Dokumentacija keeps its price list's 5 % (no override); no discount for Oprema.
+    expect(body.lines.map((l: { discount_percent: number }) => l.discount_percent)).toEqual([15, 5, 0, 0]);
+    expect(body.warnings).toEqual([
+      "ACME d.o.o.'s category discounts applied: line 1 −15 % (Svetovanje).",
+      "ACME d.o.o. has a category discount for line 4 (Svetovanje −15 %), not applied because the price was given; pass discount_percent if it should be.",
+    ]);
+    expect(body.summary).toMatch(/1 × Svetovanje à 35,00 € −15 % = 29,75 €/);
+  });
+});
+
+describe("sales order receiver and delivery type", () => {
+  it("sends an existing partner as receiver in full, checks the delivery type, and verifies both were stored", async () => {
+    const receiver = partner({ mk_id: "R1", customer: "Prejemnik d.o.o.", tax_id_number: "SI87654321", taxpayer: "true", business_entity: "true", partner_delivery_address_list: [{ mk_id: "RA", street: "Druga 2", post_number: "2000", city: "Maribor", country: "Slovenija" }] });
+    let storeDelivery = true;
+    const f = metakocka({
+      partners: [partner(), receiver],
+      search: () => ({ opr_code: "0", result: [{ count_code: "PP-1", delivery_type: "GLS" }] }),
+      stored: (put) => ({ ...put, partner: { ...(put.partner as Body), customer: "ACME d.o.o." }, receiver: { mk_id: "R1", customer: "Prejemnik d.o.o." }, ...(storeDelivery ? {} : { delivery_type: undefined }), sum_all: "42.7" }),
+      handlers: { get_delivery_service_pricelist: () => ({ opr_code: "0", pricelist_list: [{ delivery_type: "Pošta Slovenije" }] }) },
+    });
+    const { client } = await connect(f, { write: quiet({ docTypes: ["sales_order"], confirm: "never", timeoutMs: 1000 }) });
+    const order = { doc_type: "sales_order", partner_id: "400068941553", lines: [{ product_id: "P1", quantity: 1 }], receiver_partner_id: "R1" };
+    const { body } = await draft(client, { ...order, delivery_type: "gls" });
+    expect(body.warnings ?? []).toEqual([]);
+    expect(body.summary).toMatch(/\nPrejemnik: Prejemnik d\.o\.o\., Druga 2, 2000 Maribor, Slovenija\nDostava: gls\n/);
+    const saved = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
+    expect(saved).toMatchObject({ status: "created", warnings: [] });
+    expect(f.puts()[0]!.body).toMatchObject({
+      delivery_type: "gls",
+      receiver: { mk_id: "R1", mk_address_id: "RA", customer: "Prejemnik d.o.o.", tax_id_number: "SI87654321", street: "Druga 2", post_number: "2000", place: "Maribor", country: "Slovenija", taxpayer: "true" },
+    });
+
+    storeDelivery = false;
+    const { body: unknown } = await draft(client, { ...order, delivery_type: "Dron" });
+    expect(unknown.warnings[0]).toMatch(/"Dron" is not a delivery type in use \(GLS, Pošta Slovenije\)/);
+    const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: unknown.draft_id } }));
+    expect(r.warnings[0]).toMatch(/delivery type not set, not Dron/);
+  });
+});
+
+describe("e-mail attachments", () => {
+  it("attaches an invoice as PDF and a local file, shows them in the summary and keeps them out of the audit log", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mk-att-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const file = join(dir, "pogoji.txt");
+    await writeFile(file, "Splošni pogoji");
+    const log: Record<string, unknown>[] = [];
+    const f = metakocka({
+      search: () => ({ opr_code: "0", result: [{ mk_id: "INV2", count_code: "RD-2/2026" }] }),
+      handlers: {
+        report: () => new Response(new Uint8Array([37, 80, 68, 70, 45]), { status: 200, headers: { "Content-Type": "application/pdf" } }),
+        "../send_message": () => ({ opr_code: "0", message_list: [{ mk_id: "884", status: "ok" }] }),
+      },
+    });
+    const settings: WriteSettings = { docTypes: ["message"], confirm: "never", timeoutMs: 1000 };
+    const { client } = await connect(f, { write: { settings, drafts: new DraftStore(), journal: async (e) => void log.push(e), localFiles: true } });
+    const args = { channel: "email", to_emails: ["janez@example.com"], from_email: "info@martej.com", subject: "Račun", body: "V prilogi je račun." };
+    expect(parse(await client.callTool({ name: "draft_message", arguments: { ...args, attach_documents: [{ doc_type: "sales_order", number: "PP-1" }] } }))).toMatch(/give its report_id/);
+    const body = parse(await client.callTool({ name: "draft_message", arguments: { ...args, attach_documents: [{ doc_type: "sales_bill_domestic", number: "RD-2/2026" }], attachment_paths: [file] } }));
+    expect(body.summary).toMatch(/\nPriponke: RD-2-2026\.pdf \(1 KB\), pogoji\.txt \(1 KB\)\n/);
+    await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } });
+    const sent = (f.calls.find((c) => c.endpoint === "../send_message")!.body.message_list as Body[])[0]!;
+    expect(sent.attached_file_list).toEqual([
+      { file_name: "RD-2-2026.pdf", content_type: "application/pdf", file_data_base64: Buffer.from([37, 80, 68, 70, 45]).toString("base64") },
+      { file_name: "pogoji.txt", content_type: "text/plain", file_data_base64: Buffer.from("Splošni pogoji").toString("base64") },
+    ]);
+    expect(JSON.stringify(log)).not.toContain(Buffer.from("Splošni pogoji").toString("base64"));
+    expect(JSON.stringify(log)).toContain('"file_name":"pogoji.txt"');
+
+    // Without local files (HTTP mode) only Metakocka's own documents can be attached.
+    const remote = await connect(f, { write: { settings, drafts: new DraftStore(), journal: async () => {} } });
+    expect(parse(await remote.client.callTool({ name: "draft_message", arguments: { ...args, attachment_paths: [file] } }))).toMatch(/only possible when the server runs on the user's computer/);
   });
 });

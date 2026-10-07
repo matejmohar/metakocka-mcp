@@ -162,7 +162,11 @@ export async function buildStockDocDraft(ctx: BuildContext & { tool: ToolContext
       });
     } else {
       lines = input.lines.map((l, i) => {
-        return productLine(catalog, { ...l }, i, { currency, foreignTax: partner.foreign && l.vat_percent === undefined ? catalogZeroTax(catalog) ?? "unknown" : undefined });
+        return productLine(catalog, { ...l }, i, {
+          currency,
+          foreignTax: partner.foreign && l.vat_percent === undefined ? catalogZeroTax(catalog) ?? "unknown" : undefined,
+          partnerDiscounts: partner.discounts,
+        });
       });
     }
   }

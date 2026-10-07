@@ -170,6 +170,11 @@ export function verifyStored(draft: Draft, doc: MkRecord): string[] {
   if (due && fromMkDate(doc.duo_payment) && fromMkDate(doc.duo_payment) !== due) problems.push(`due date ${fromMkDate(doc.duo_payment)}, not ${due}`);
   // Invoices are meant to stay not issued until the user issues them in Metakocka.
   if (draft.docType.startsWith("sales_bill_") && str(doc.publish_ts)) problems.push("the invoice is already issued");
+  // Metakocka silently drops a receiver given badly and a delivery type it doesn't know.
+  const receiver = draft.payload.receiver as MkRecord | undefined;
+  if (receiver && str((doc.receiver as MkRecord | undefined)?.mk_id) !== str(receiver.mk_id)) problems.push(`the receiver is ${str((doc.receiver as MkRecord | undefined)?.customer) ?? "not set"}, not ${str(receiver.customer)}`);
+  const deliveryType = str(draft.payload.delivery_type);
+  if (deliveryType && str(doc.delivery_type)?.toLowerCase() !== deliveryType.toLowerCase()) problems.push(`delivery type ${str(doc.delivery_type) ?? "not set"}, not ${deliveryType} (Metakocka leaves out a type it doesn't know)`);
   // Purchase invoices carry the supplier's own number.
   const number = str(draft.payload.count_code);
   if (draft.docType.startsWith("purchase_bill_") && number && str(doc.count_code) && str(doc.count_code) !== number) problems.push(`number ${str(doc.count_code)}, not ${number}`);

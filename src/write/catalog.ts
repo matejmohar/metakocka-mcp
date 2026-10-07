@@ -21,6 +21,8 @@ export interface CatalogProduct {
   purchasing: boolean;
   /** A service, not goods kept in stock. */
   service: boolean;
+  /** Every category the product is in, with the categories above them (a product in Apple › MacBook is in both). */
+  categories: string[];
   /** Net sales price from the one applicable price list entry, when there is exactly one. */
   price?: number;
   /** Discount on that price list entry, in percent. */
@@ -36,7 +38,7 @@ const MAX_PRODUCTS = 20_000;
 
 export function loadCatalog(client: MetakockaClient, cache: TtlCache, today: string): Promise<Map<string, CatalogProduct>> {
   return cache.getOrLoad(`write:catalog:${today}`, async () => {
-    const { products, truncated } = await listAllProducts(client, { includePrices: true }, MAX_PRODUCTS);
+    const { products, truncated } = await listAllProducts(client, { includePrices: true, includeCategories: true }, MAX_PRODUCTS);
     if (truncated) throw new Error(`The catalogue has more than ${MAX_PRODUCTS} products; writing documents is not supported for it yet.`);
     return new Map(products.map((p) => [str(p.mk_id) ?? "", toCatalogProduct(p, today)]).filter(([id]) => id) as [string, CatalogProduct][]);
   });
@@ -77,12 +79,27 @@ export function toCatalogProduct(p: MkRecord, today: string): CatalogProduct {
     sales: bool(p.sales) === true,
     purchasing: bool(p.purchasing) === true,
     service: bool(p.service) === true,
+    categories: categoryLabels(p.category_tree_list),
     price: one ? num(one.price) : undefined,
     discountPercent: one ? num(one.discount) : undefined,
     taxCode: taxCodes.length === 1 ? taxCodes[0] : undefined,
     taxRatePercent: taxDef ? num(taxDef.tax_desc) ?? ratePercent(num(taxDef.tax_factor)) : undefined,
     problem,
   };
+}
+
+/** Labels of every node in a product's category tree. */
+function categoryLabels(tree: unknown): string[] {
+  const labels: string[] = [];
+  const walk = (nodes: unknown) => {
+    for (const n of asArray<MkRecord>(nodes)) {
+      const label = str(n.tree_node_label);
+      if (label) labels.push(label);
+      walk(n.tree_node_list);
+    }
+  };
+  walk(tree);
+  return [...new Set(labels)];
 }
 
 function ratePercent(factor: number | undefined): number | undefined {

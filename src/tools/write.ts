@@ -139,7 +139,10 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
         (offers || orders || invoices
           ? `${purchases ? `On ${[offers && "offers", orders && "orders", invoices && "invoices"].filter(Boolean).join(" and ")}, prices` : "Prices"} and VAT come from Metakocka's price list unless a price is given. `
           : "") +
-        (orders ? "A sales order can carry the customer's own order number (buyer_order) and a delivery date. " : "") +
+        (orders
+          ? "A sales order can carry the customer's own order number (buyer_order), a delivery date, a delivery type and " +
+            "another existing partner as receiver (prejemnik); a missing receiver is added with draft_partner first, never made up. "
+          : "") +
         (invoices
           ? "Invoices are saved NOT issued: the user checks and issues (prints) them in Metakocka; they move no stock. " +
             `An invoice can also be made from an offer (from_offer: its lines, partner and a link to it)${orders ? " or a sales order (from_order)" : ""}. The payment term ` +
@@ -208,6 +211,9 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
         ...(orders
           ? {
               buyer_order: z.string().max(30).optional().describe("Sales orders: the customer's own order number (naročilo kupca)."),
+              receiver_partner_id: z.string().optional().describe("Sales orders: deliver to another existing partner (prejemnik), by id from search_partners."),
+              receiver_address_id: z.string().optional().describe("Sales orders: that receiver's address, when it has several."),
+              delivery_type: z.string().max(100).optional().describe("Sales orders: delivery type (način dostave) as in Metakocka, e.g. GLS."),
               delivery_date: z.string().optional().describe("Sales orders: delivery deadline (rok dobave), YYYY-MM-DD."),
             }
           : {}),
@@ -253,6 +259,9 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           from_offer: ["invoice"],
           from_order: ["invoice"],
           buyer_order: ["order"],
+          receiver_partner_id: ["order"],
+          receiver_address_id: ["order"],
+          delivery_type: ["order"],
           delivery_date: ["order"],
           service_from: ["invoice", "purchase"],
           service_to: ["invoice", "purchase"],
@@ -702,11 +711,17 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           subject: z.string().max(200).optional(),
           body: z.string().max(20_000).optional().describe("E-mail: plain text; blank lines separate paragraphs."),
           marketing: z.boolean().default(false).describe("A marketing message (default: transactional)."),
+          attach_documents: z
+            .array(z.object({ doc_type: z.string(), number: z.string(), report_id: z.string().regex(/^\d+$/).optional() }))
+            .max(10)
+            .optional()
+            .describe("E-mail: Metakocka documents to attach as PDF, e.g. [{doc_type: \"sales_bill_domestic\", number: \"RD-2/2026\"}]; other than invoices and credit notes they need report_id."),
+          attachment_paths: z.array(z.string()).max(10).optional().describe("E-mail: absolute paths of files on this computer to attach (PDF, images, XML, TXT, CSV)."),
           language: z.enum(["sl", "en"]).default("sl").describe("Language of the summary the user confirms."),
         }),
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       },
-      async (args) => run(async () => recordAnswer(buildMessageDraft(recordContext(), args as MessageInput))),
+      async (args) => run(async () => recordAnswer(await buildMessageDraft({ ...recordContext(), localFiles: write.localFiles === true }, args as MessageInput))),
     );
   }
 

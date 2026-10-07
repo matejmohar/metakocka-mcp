@@ -30,13 +30,15 @@ export interface ChangeSpec {
   check?: (client: MetakockaClient) => Promise<ChangeCheck>;
   /** What to look at in Metakocka when the outcome is unknown and can't be checked here. */
   manualCheck?: string;
+  /** What the audit log records instead of the payload (e.g. without attached files). */
+  logPayload?: MkRecord;
 }
 
 export async function commitChange(ctx: CommitContext, draft: Draft): Promise<CommitOutcome> {
   const spec = draft.change!;
   const base = { draft_id: draft.id, doc_type: draft.docType, installation: ctx.installation };
   draft.status = "committing";
-  await ctx.journal({ ...base, event: "attempt", endpoint: spec.endpoint, payload: draft.payload });
+  await ctx.journal({ ...base, event: "attempt", endpoint: spec.endpoint, payload: spec.logPayload ?? draft.payload });
   let response: MkRecord;
   try {
     response = await ctx.client.call(spec.endpoint, draft.payload, { idempotent: false, timeoutMs: ctx.timeoutMs });

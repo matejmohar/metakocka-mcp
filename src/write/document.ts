@@ -7,7 +7,7 @@ import { searchPartners, type MkRecord } from "../api.js";
 import type { MetakockaClient } from "../client.js";
 import { MetakockaError } from "../client.js";
 import type { TtlCache } from "../cache.js";
-import { asArray, bool, round2, str } from "../util.js";
+import { asArray, bool, num, round2, str } from "../util.js";
 import type { CatalogProduct } from "./catalog.js";
 import type { Draft, DraftLine, DraftStore, DraftTotals } from "./drafts.js";
 
@@ -61,16 +61,24 @@ export interface ResolvedPartner {
   /** VAT registered (davčni zavezanec). */
   taxpayer: boolean;
   addresses: MkRecord[];
+  /** The partner's discounts per product category (popusti partnerja). */
+  discounts: PartnerDiscount[];
+  /** As get_partner returned it. */
+  record: MkRecord;
 }
 
-/**
- * The partner by its id, refused when it is foreign and `foreign` isn't allowed, or (for sales documents)
- * has category discounts.
- */
+export interface PartnerDiscount {
+  categories: string[];
+  percent: number;
+  /** Replaces a discount the price list already gives; otherwise that one stays. */
+  override: boolean;
+}
+
+/** The partner by its id, refused when it is foreign and `foreign` isn't allowed. */
 export async function resolvePartner(
   client: MetakockaClient,
   partnerId: string,
-  { foreign, what, discounts = "refuse" }: { foreign: "refuse" | "allow"; what: string; discounts?: "refuse" | "ignore" },
+  { foreign, what }: { foreign: "refuse" | "allow"; what: string; discounts?: "ignore" },
 ): Promise<ResolvedPartner> {
   const found = (await findPartners(client, { partnerId, withDiscounts: true })).filter((p) => str(p.mk_id) === partnerId);
   if (found.length !== 1) {
@@ -85,12 +93,6 @@ export async function resolvePartner(
   if (isForeign && foreign === "refuse") {
     throw new DraftError(`${name} is a foreign partner. ${what} for foreign partners are not supported yet; create it in Metakocka.`);
   }
-  if (discounts === "refuse" && asArray(p.discounts).length) {
-    throw new DraftError(
-      `${name} has partner discounts per product category in Metakocka. They are not applied automatically yet, ` +
-        "so this document can't be created here; create it in Metakocka.",
-    );
-  }
   return {
     id: partnerId,
     name,
@@ -98,6 +100,14 @@ export async function resolvePartner(
     foreign: isForeign,
     taxpayer: bool(p.taxpayer) === true,
     addresses: asArray<MkRecord>(p.partner_delivery_address_list),
+    discounts: asArray<MkRecord>(p.discounts)
+      .map((d) => ({
+        categories: asArray<string>(d.categories).map((c) => String(c).trim()).filter(Boolean),
+        percent: num(d.discount_percent) ?? 0,
+        override: bool(d.override_existing) === true,
+      }))
+      .filter((d) => d.categories.length && d.percent > 0),
+    record: p,
   };
 }
 
@@ -134,6 +144,18 @@ export interface LineOptions {
   foreignTax?: TaxFallback | "unknown";
   /** Document currency; price lists are in EUR, so other currencies need every price given. */
   currency?: string;
+  /** The partner's discounts per product category, applied to lines priced from the price list. */
+  partnerDiscounts?: PartnerDiscount[];
+}
+
+/** The partner's best discount for a product, by the product's categories. */
+export function partnerDiscountFor(discounts: PartnerDiscount[] | undefined, product: CatalogProduct): (PartnerDiscount & { category: string }) | undefined {
+  let best: (PartnerDiscount & { category: string }) | undefined;
+  for (const d of discounts ?? []) {
+    const category = d.categories.find((c) => product.categories.some((pc) => pc.toLowerCase() === c.toLowerCase()));
+    if (category && (!best || d.percent > best.percent)) best = { ...d, category };
+  }
+  return best;
 }
 
 /** The one tax code the catalogue's price lists use for a VAT rate. */
@@ -168,6 +190,45 @@ export function foreignVatWarnings(partner: ResolvedPartner, lines: DraftLine[])
     return [`${partner.name} is a foreign private person (not VAT registered) and no line charges VAT; for sales to private persons in the EU Slovenian VAT (or OSS) may apply.`];
   }
   return [];
+}
+
+/**
+ * A partner as a document's receiver (prejemnik). put_document ignores a receiver given only by id (it takes the
+ * buyer instead) and creates a new partner from one given without it, so an existing partner is sent in full, with its id.
+ */
+export function receiverPayload(partner: ResolvedPartner, address: { id: string; record: MkRecord }): MkRecord {
+  const p = partner.record;
+  const a = address.record;
+  return {
+    mk_id: partner.id,
+    mk_address_id: address.id,
+    business_entity: str(p.business_entity) ?? "true",
+    taxpayer: String(partner.taxpayer),
+    foreign_county: String(partner.foreign),
+    ...(partner.taxId ? { tax_id_number: partner.taxId } : {}),
+    customer: partner.name,
+    street: str(a.street),
+    post_number: str(a.post_number),
+    place: str(a.city),
+    country: str(a.country),
+  };
+}
+
+/** What the partner's category discounts did to the lines, for the draft's warnings. */
+export function partnerDiscountNotes(partner: Pick<ResolvedPartner, "name" | "discounts">, lines: DraftLine[], input: LineInput[] | undefined, catalog: Map<string, CatalogProduct>): string[] {
+  if (!partner.discounts.length) return [];
+  const applied = lines.map((l, i) => (l.partnerDiscount ? `line ${i + 1} −${l.discountPercent} % (${l.partnerDiscount})` : undefined)).filter(Boolean);
+  const notes = applied.length ? [`${partner.name}'s category discounts applied: ${applied.join(", ")}.`] : [];
+  // A price given by hand gets no automatic discount: say so when one would have applied.
+  const skipped = (input ?? [])
+    .map((l, i) => {
+      const product = catalog.get(lines[i]?.productId ?? "");
+      const d = product && l.price !== undefined && l.discount_percent === undefined ? partnerDiscountFor(partner.discounts, product) : undefined;
+      return d ? `line ${i + 1} (${d.category} −${d.percent} %)` : undefined;
+    })
+    .filter(Boolean);
+  if (skipped.length) notes.push(`${partner.name} has a category discount for ${skipped.join(", ")}, not applied because the price was given; pass discount_percent if it should be.`);
+  return notes;
 }
 
 /** A currency as an ISO code, e.g. "usd" → "USD". */
@@ -234,8 +295,19 @@ export function productLine(catalog: Map<string, CatalogProduct>, line: LineInpu
   const quantity = line.quantity;
   if (quantity === undefined || !(quantity > 0)) throw new DraftError(`Line ${n}: quantity must be more than 0.`);
 
-  const discountPercent = line.discount_percent ?? (line.price === undefined && currency === "EUR" ? product.discountPercent ?? 0 : 0);
-  return priceLine({ product, quantity, price, discountPercent, taxCode, taxRatePercent });
+  // Discount: given; else, for a price from the price list, the list's and the partner's discount for the product's category.
+  let discountPercent = line.discount_percent ?? 0;
+  let partnerDiscount: string | undefined;
+  if (line.discount_percent === undefined && line.price === undefined && currency === "EUR") {
+    const listed = product.discountPercent ?? 0;
+    const partner = partnerDiscountFor(options.partnerDiscounts, product);
+    discountPercent = listed;
+    if (partner && (partner.override || !listed)) {
+      discountPercent = partner.percent;
+      partnerDiscount = partner.category;
+    }
+  }
+  return { ...priceLine({ product, quantity, price, discountPercent, taxCode, taxRatePercent }), ...(partnerDiscount ? { partnerDiscount } : {}) };
 }
 
 /** Net, tax and gross of a line. */

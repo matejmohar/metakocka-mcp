@@ -112,7 +112,11 @@ export async function buildCreditNoteDraft(ctx: BuildContext, input: CreditNoteI
         if (l.vat_percent === undefined) throw new DraftError(`Line ${n}: give vat_percent as on the supplier's credit note.`);
         line = priceLine({ product, quantity: l.quantity!, price: l.price, discountPercent: l.discount_percent ?? 0, taxCode: taxCodeFor(catalog, history, product, l.vat_percent, n), taxRatePercent: l.vat_percent });
       } else {
-        line = productLine(catalog, l, i, { currency, foreignTax: partner.foreign && l.vat_percent === undefined ? catalogZeroTax(catalog) ?? "unknown" : undefined });
+        line = productLine(catalog, l, i, {
+          currency,
+          foreignTax: partner.foreign && l.vat_percent === undefined ? catalogZeroTax(catalog) ?? "unknown" : undefined,
+          partnerDiscounts: partner.discounts,
+        });
       }
       if (type === "financial" && !catalog.get(line.productId)?.service) {
         throw new DraftError(`Line ${i + 1}: ${line.name} is goods; a financial credit note takes only services (for returned goods use credit_type goods).`);

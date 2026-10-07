@@ -4,7 +4,8 @@
  * address by mk_id / mk_address_id, products by mk_id. Prices and tax codes
  * come from Metakocka's catalogue, not from the model. Nothing is written here.
  */
-import type { MkRecord } from "../api.js";
+import { deliveryPriceLists, searchDocuments, type MkRecord } from "../api.js";
+import { str } from "../util.js";
 import { isIsoDate, toMkDate } from "../dates.js";
 import { loadCatalog } from "./catalog.js";
 import {
@@ -13,12 +14,14 @@ import {
   currencyCode,
   DraftError,
   foreignVatWarnings,
+  partnerDiscountNotes,
   duplicateWarning,
   linesAndTotals,
   oneLine,
   productLine,
   productListPayload,
   resolveAddress,
+  receiverPayload,
   resolvePartner,
   totalsOf,
   type BuildContext,
@@ -41,6 +44,11 @@ export interface OfferInput {
 export interface OrderInput extends Omit<OfferInput, "valid_days"> {
   /** The customer's own order number (naročilo kupca), shown on the order. */
   buyer_order?: string;
+  /** Where it is delivered when that isn't the buyer: an existing partner (prejemnik). */
+  receiver_partner_id?: string;
+  receiver_address_id?: string;
+  /** Delivery type (način dostave) as in Metakocka's register, e.g. "GLS". */
+  delivery_type?: string;
   /** Delivery deadline (rok dobave), YYYY-MM-DD. */
   delivery_date?: string;
 }
@@ -53,6 +61,7 @@ export function buildOfferDraft(ctx: BuildContext, input: OfferInput): Promise<{
 export function buildOrderDraft(ctx: BuildContext, input: OrderInput): Promise<{ draft: Draft; warnings: string[] }> {
   if (input.delivery_date !== undefined && !isIsoDate(input.delivery_date)) throw new DraftError("delivery_date must be a date as YYYY-MM-DD.");
   if (input.delivery_date !== undefined && input.delivery_date < ctx.today) throw new DraftError("delivery_date is in the past.");
+  if (input.receiver_address_id && !input.receiver_partner_id) throw new DraftError("receiver_address_id needs receiver_partner_id.");
   return buildSalesDraft(ctx, "sales_order", input);
 }
 
@@ -71,9 +80,29 @@ async function buildSalesDraft(
   if (!input.lines.length) throw new DraftError(`${offer ? "An offer" : "A sales order"} needs at least one product line.`);
   // Foreign partners: no VAT by default (reverse charge, export); a line's vat_percent charges VAT.
   const foreignTax = partner.foreign ? catalogZeroTax(catalog) ?? "unknown" : undefined;
-  const lines = input.lines.map((line, i) => productLine(catalog, line, i, { foreignTax, currency }));
-  warnings.push(...foreignVatWarnings(partner, lines));
+  const lines = input.lines.map((line, i) => productLine(catalog, line, i, { foreignTax, currency, partnerDiscounts: partner.discounts }));
+  warnings.push(...foreignVatWarnings(partner, lines), ...partnerDiscountNotes(partner, lines, input.lines, catalog));
   const totals = totalsOf(lines, currency);
+
+  // Receiver: an existing partner, sent in full (see receiverPayload).
+  let receiver: { name?: string; address: string; payload: MkRecord } | undefined;
+  if (input.receiver_partner_id) {
+    const r = await resolvePartner(ctx.client, input.receiver_partner_id, { foreign: "allow", what: "Receivers" });
+    const a = resolveAddress(r, input.receiver_address_id);
+    receiver = { name: r.name, address: a.text, payload: receiverPayload(r, a) };
+  }
+  const deliveryType = input.delivery_type?.trim() || undefined;
+  if (deliveryType) {
+    // Metakocka silently drops a delivery type it doesn't know, so it is checked against the ones in use.
+    const known = await knownDeliveryTypes(ctx);
+    if (!known.some((k) => k.toLowerCase() === deliveryType.toLowerCase())) {
+      warnings.push(
+        known.length
+          ? `"${deliveryType}" is not a delivery type in use (${known.join(", ")}). Metakocka leaves out a delivery type it doesn't know; the saved order is checked.`
+          : `No delivery types are in use yet, so "${deliveryType}" can't be checked; Metakocka leaves out one it doesn't know, and the saved order is checked.`,
+      );
+    }
+  }
 
   const validDays = offer ? input.valid_days ?? 30 : undefined;
   const buyerOrder = input.buyer_order?.trim() || undefined;
@@ -87,6 +116,8 @@ async function buildSalesDraft(
     ...(input.note ? { notes: input.note } : {}),
     ...(buyerOrder ? { buyer_order: buyerOrder } : {}),
     ...(input.delivery_date ? { delivery_deadline: toMkDate(input.delivery_date) } : {}),
+    ...(receiver ? { receiver: receiver.payload } : {}),
+    ...(deliveryType ? { delivery_type: deliveryType } : {}),
     product_list: productListPayload(lines),
   };
 
@@ -106,7 +137,11 @@ async function buildSalesDraft(
   });
   // The id goes into Metakocka's change log, so the document can be traced back to this draft.
   payload.document_change_log_notes = `${CHANGE_LOG_PREFIX} ${draft.id}`;
-  draft.summary = summarize(draft, { title: input.title, note: input.note, validDays, buyerOrder, deliveryDate: input.delivery_date }, ctx.installation);
+  draft.summary = summarize(
+    draft,
+    { title: input.title, note: input.note, validDays, buyerOrder, deliveryDate: input.delivery_date, receiver, deliveryType },
+    ctx.installation,
+  );
   return { draft, warnings };
 }
 
@@ -116,7 +151,15 @@ async function buildSalesDraft(
  */
 function summarize(
   d: Draft,
-  extra: { title?: string; note?: string; validDays?: number; buyerOrder?: string; deliveryDate?: string },
+  extra: {
+    title?: string;
+    note?: string;
+    validDays?: number;
+    buyerOrder?: string;
+    deliveryDate?: string;
+    receiver?: { name?: string; address: string };
+    deliveryType?: string;
+  },
   installation: string | undefined,
 ): string {
   const order = d.docType === "sales_order";
@@ -127,6 +170,8 @@ function summarize(
           title: "Naziv",
           note: "Opomba",
           buyerOrder: "Naročilo kupca",
+          receiver: "Prejemnik",
+          deliveryType: "Dostava",
           date: "Datum",
           valid: `velja ${extra.validDays} dni`,
           delivery: "rok dobave",
@@ -136,6 +181,8 @@ function summarize(
           title: "Title",
           note: "Note",
           buyerOrder: "Customer's order",
+          receiver: "Deliver to",
+          deliveryType: "Delivery",
           date: "Dated",
           valid: `valid ${extra.validDays} days`,
           delivery: "deliver by",
@@ -144,6 +191,8 @@ function summarize(
     `${t.head} ${d.partner.name}${d.partner.taxId ? ` (${d.partner.taxId})` : ""}`,
     d.partner.address,
     ...(extra.buyerOrder ? [`${t.buyerOrder}: ${extra.buyerOrder}`] : []),
+    ...(extra.receiver ? [`${t.receiver}: ${extra.receiver.name}, ${extra.receiver.address}`] : []),
+    ...(extra.deliveryType ? [`${t.deliveryType}: ${extra.deliveryType}`] : []),
     ...(extra.title ? [`${t.title}: ${extra.title}`] : []),
     ...(extra.note ? [`${t.note}: ${oneLine(extra.note)}`] : []),
     "",
@@ -156,4 +205,13 @@ function summarize(
       ...(installation ? [`Metakocka: ${installation}`] : []),
     ].join(" · "),
   ].join("\n");
+}
+
+/** Delivery types on the latest sales orders and in the delivery price lists: the API has no list of the register. */
+async function knownDeliveryTypes(ctx: BuildContext): Promise<string[]> {
+  const [{ documents }, lists] = await Promise.all([
+    searchDocuments(ctx.client, { docType: "sales_order", limit: 100 }),
+    deliveryPriceLists(ctx.client).catch(() => []),
+  ]);
+  return [...new Set([...documents.map((d) => str(d.delivery_type)), ...lists.map((l) => str(l.delivery_type))].filter((s): s is string => !!s))];
 }
