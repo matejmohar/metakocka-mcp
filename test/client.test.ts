@@ -76,20 +76,74 @@ describe("MetakockaClient", () => {
     expect(n).toBe(3);
   });
 
-  it("runs calls one at a time", async () => {
-    let active = 0;
-    let maxActive = 0;
-    const { client } = fakeMetakocka({
-      search: async () => {
-        active++;
-        maxActive = Math.max(maxActive, active);
-        await new Promise((r) => setTimeout(r, 5));
-        active--;
-        return { opr_code: "0" };
-      },
-    });
+  /** A fake where every endpoint takes a few ms and records how many calls overlap, per endpoint and overall. */
+  function overlapping(endpoints: string[], limits?: ConstructorParameters<typeof MetakockaClient>[0]["limits"]) {
+    const active: Record<string, number> = {};
+    const peak: Record<string, number> = { all: 0 };
+    let all = 0;
+    const handler = (endpoint: string) => async () => {
+      all++;
+      active[endpoint] = (active[endpoint] ?? 0) + 1;
+      peak.all = Math.max(peak.all ?? 0, all);
+      peak[endpoint] = Math.max(peak[endpoint] ?? 0, active[endpoint] ?? 0);
+      await new Promise((r) => setTimeout(r, 10));
+      all--;
+      active[endpoint] = (active[endpoint] ?? 1) - 1;
+      return { opr_code: "0" };
+    };
+    const { fetch } = fakeMetakocka(Object.fromEntries(endpoints.map((e) => [e, handler(e)])));
+    const client = new MetakockaClient({ companyId: "16", secretKey: "k", fetch, sleep: async () => {}, limits });
+    return { client, peak };
+  }
+
+  it("runs one search at a time by default", async () => {
+    const { client, peak } = overlapping(["search"]);
     await Promise.all([client.call("search"), client.call("search"), client.call("search")]);
-    expect(maxActive).toBe(1);
+    expect(peak.search).toBe(1);
+  });
+
+  it("runs direct calls next to a search, at most 2 requests at once by default", async () => {
+    const { client, peak } = overlapping(["search", "get_document"]);
+    await Promise.all([
+      client.call("search"),
+      client.call("search"),
+      client.call("get_document"),
+      client.call("get_document"),
+      client.call("get_document"),
+    ]);
+    expect(peak.all).toBe(2);
+    expect(peak.search).toBe(1);
+    expect(peak.get_document).toBe(2); // while no search was running
+  });
+
+  it("lets a search by document number run as a direct call", async () => {
+    const { client, peak } = overlapping(["search"]);
+    await Promise.all([client.call("search"), client.call("search", {}, { kind: "direct" })]);
+    expect(peak.search).toBe(2);
+  });
+
+  it("follows configured limits", async () => {
+    const { client, peak } = overlapping(["search", "get_partner"], { maxConcurrent: 4, maxConcurrentSearch: 2, queueTimeoutMs: 10_000 });
+    await Promise.all([...Array(4)].map(() => client.call("search")).concat([...Array(4)].map(() => client.call("get_partner"))));
+    expect(peak.all).toBe(4);
+    expect(peak.search).toBe(2);
+  });
+
+  it("fails a call that waits too long for a free slot, and keeps going", async () => {
+    let finish: (() => void) | undefined;
+    const { fetch } = fakeMetakocka({
+      search: () => new Promise((resolve) => (finish = () => resolve({ opr_code: "0" }))),
+      get_document: () => ({ opr_code: "0", ok: true }),
+    });
+    const client = new MetakockaClient({ companyId: "16", secretKey: "k", fetch, limits: { maxConcurrent: 1, maxConcurrentSearch: 1, queueTimeoutMs: 20 } });
+    const slow = client.call("search");
+    await new Promise((r) => setTimeout(r, 0)); // the search takes the only slot
+    const error = await client.call("get_document").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(MetakockaError);
+    expect((error as Error).message).toMatch(/waited .* for a free slot/);
+    finish?.();
+    await slow;
+    await expect(client.call("get_document")).resolves.toMatchObject({ ok: true });
   });
 
   it("keeps working after a failed call", async () => {

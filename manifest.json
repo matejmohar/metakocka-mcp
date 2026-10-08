@@ -39,6 +39,8 @@
         "NODE_EXTRA_CA_CERTS": "${user_config.ca_cert}",
         "METAKOCKA_TIMEOUT_SECONDS": "${user_config.timeout_seconds}",
         "METAKOCKA_CACHE_SECONDS": "${user_config.cache_seconds}",
+        "METAKOCKA_MAX_CONCURRENT": "${user_config.max_concurrent}",
+        "METAKOCKA_MAX_CONCURRENT_SEARCH": "${user_config.max_concurrent_search}",
         "METAKOCKA_PDF_DIR": "${user_config.pdf_dir}",
         "METAKOCKA_WRITE_OFFERS": "${user_config.allow_offers}",
         "METAKOCKA_WRITE_INVOICES": "${user_config.allow_invoices}",
@@ -268,6 +270,24 @@
       "default": 30,
       "min": 5,
       "max": 600
+    },
+    "max_concurrent": {
+      "type": "number",
+      "title": "Requests at once",
+      "description": "How many requests are sent to Metakocka at the same time (lookups by ID, saving documents and searches together).",
+      "required": false,
+      "default": 2,
+      "min": 1,
+      "max": 10
+    },
+    "max_concurrent_search": {
+      "type": "number",
+      "title": "Searches at once",
+      "description": "How many searches (document, product and stock lists, bank statements, exports) run at the same time. Large searches can slow Metakocka down; keep this at 1 unless your installation handles more.",
+      "required": false,
+      "default": 1,
+      "min": 1,
+      "max": 10
     },
     "cache_seconds": {
       "type": "number",

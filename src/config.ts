@@ -3,12 +3,14 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { MetakockaClient } from "./client.js";
 import { InstallationUrlError, normalizeBaseUrl } from "./installation.js";
+import { type ConcurrencyLimits, DEFAULT_LIMITS } from "./limits.js";
 
 export interface MetakockaConfig {
   companyId: string;
   secretKey: string;
   baseUrl: string;
   timeoutMs: number;
+  limits: ConcurrencyLimits;
 }
 
 export class ConfigError extends Error {
@@ -47,7 +49,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MetakockaConfi
 
   // Settings that only take effect elsewhere are still checked here, so a typo shows up on the first tool call.
   cacheTtlMs(env, { strict: true });
-  return { companyId, secretKey, baseUrl: baseUrlFromEnv(env), timeoutMs: timeoutMsFromEnv(env) };
+  return { companyId, secretKey, baseUrl: baseUrlFromEnv(env), timeoutMs: timeoutMsFromEnv(env), limits: limitsFromEnv(env) };
 }
 
 /** The API base URL from METAKOCKA_BASE_URL (any form normalizeBaseUrl accepts), or the public installation. */
@@ -74,6 +76,28 @@ export function timeoutMsFromEnv(env: NodeJS.ProcessEnv = process.env): number {
     );
   }
   return value;
+}
+
+/**
+ * How many requests run at once, from METAKOCKA_MAX_CONCURRENT (default 2),
+ * METAKOCKA_MAX_CONCURRENT_SEARCH (default 1, at most the former) and
+ * METAKOCKA_QUEUE_TIMEOUT_SECONDS (how long a request waits for a free slot,
+ * default 300).
+ */
+export function limitsFromEnv(env: NodeJS.ProcessEnv = process.env): ConcurrencyLimits {
+  const count = (name: string, fallback: number): number => {
+    const raw = envValue(env, name);
+    if (raw === undefined) return fallback;
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value < 1) throw new ConfigError(`${name} must be a whole number, 1 or more.`);
+    return value;
+  };
+  const maxConcurrent = count("METAKOCKA_MAX_CONCURRENT", DEFAULT_LIMITS.maxConcurrent);
+  const maxConcurrentSearch = Math.min(count("METAKOCKA_MAX_CONCURRENT_SEARCH", DEFAULT_LIMITS.maxConcurrentSearch), maxConcurrent);
+  const rawWait = envValue(env, "METAKOCKA_QUEUE_TIMEOUT_SECONDS");
+  const wait = rawWait === undefined ? DEFAULT_LIMITS.queueTimeoutMs / 1000 : Number(rawWait);
+  if (!Number.isFinite(wait) || wait <= 0) throw new ConfigError("METAKOCKA_QUEUE_TIMEOUT_SECONDS must be a positive number of seconds.");
+  return { maxConcurrent, maxConcurrentSearch, queueTimeoutMs: wait * 1000 };
 }
 
 /**

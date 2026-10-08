@@ -208,7 +208,12 @@ export async function findDocumentIdByNumber(
   docType: DocType,
   number: string,
 ): Promise<string | undefined> {
-  const response = await client.call("search", { doc_type: docType, query: number, limit: 50, offset: 0 });
+  const response = await client.call(
+    "search",
+    { doc_type: docType, query: number, limit: 50, offset: 0 },
+    // Matches a handful of documents at most, so it doesn't wait behind large searches.
+    { kind: "direct" },
+  );
   const wanted = number.trim().toLowerCase();
   const hit = asArray<MkRecord>(response.result).find((r) => str(r.count_code)?.toLowerCase() === wanted);
   return hit ? str(hit.mk_id) : undefined;
@@ -274,7 +279,9 @@ export async function listProducts(
   if (q.includeLastPurchasePrice) params.return_last_purchase_price = "true";
   if (q.includeCompound) params.return_product_compound = "true";
   if (q.includeCategories) params.return_category = "true";
-  const response = await client.call("json/product_list", params);
+  // An exact code or ID matches one product: a lookup, not a search.
+  const direct = q.exact && !!(q.productId || q.code);
+  const response = await client.call("json/product_list", params, direct ? { kind: "direct" } : {});
   return { products: asArray<MkRecord>(response.product_list), offset, limit };
 }
 
