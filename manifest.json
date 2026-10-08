@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "metakocka-mcp",
   "display_name": "Metakocka",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Ask Claude about your Metakocka ERP: documents, invoices, stock, products and partners. Read-only by default; creating offers, invoices, received invoices, partners and products can be turned on. Works in Slovenian and English (slovenščina in angleščina).",
   "long_description": "Connects Claude to your Metakocka ERP so you can ask questions about your business in plain language: who owes you money and how overdue they are, top products last month, stock in a warehouse, or the full detail of a sales order. By default it is read-only. Creating offers (ponudbe / predračuni), invoices (računi) and received invoices (prejeti računi, copied from the supplier's PDF) can be turned on in the settings, and so can adding new partners and products: documents are linked to partners and products that exist in Metakocka (or that you have just added), and you confirm each one before it is saved. Invoices are saved not issued, for you to check and issue in Metakocka. It never changes or deletes anything. Requests go directly from your computer to Metakocka's API. This is an independent community project, not made or endorsed by Metakocka d.o.o.",
   "author": {
@@ -39,6 +39,8 @@
         "NODE_EXTRA_CA_CERTS": "${user_config.ca_cert}",
         "METAKOCKA_TIMEOUT_SECONDS": "${user_config.timeout_seconds}",
         "METAKOCKA_CACHE_SECONDS": "${user_config.cache_seconds}",
+        "METAKOCKA_MAX_CONCURRENT": "${user_config.max_concurrent}",
+        "METAKOCKA_MAX_CONCURRENT_SEARCH": "${user_config.max_concurrent_search}",
         "METAKOCKA_PDF_DIR": "${user_config.pdf_dir}",
         "METAKOCKA_WRITE_OFFERS": "${user_config.allow_offers}",
         "METAKOCKA_WRITE_INVOICES": "${user_config.allow_invoices}",
@@ -268,6 +270,24 @@
       "default": 30,
       "min": 5,
       "max": 600
+    },
+    "max_concurrent": {
+      "type": "number",
+      "title": "Requests at once",
+      "description": "How many requests are sent to Metakocka at the same time (lookups by ID, saving documents and searches together).",
+      "required": false,
+      "default": 2,
+      "min": 1,
+      "max": 10
+    },
+    "max_concurrent_search": {
+      "type": "number",
+      "title": "Searches at once",
+      "description": "How many searches (document, product and stock lists, bank statements, exports) run at the same time. Large searches can slow Metakocka down; keep this at 1 unless your installation handles more.",
+      "required": false,
+      "default": 1,
+      "min": 1,
+      "max": 10
     },
     "cache_seconds": {
       "type": "number",

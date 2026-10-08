@@ -16,7 +16,7 @@ import { Readable } from "node:stream";
 import { createMcpHandler, type McpHttpHandler } from "@modelcontextprotocol/server";
 import { TtlCache } from "./cache.js";
 import { MetakockaClient } from "./client.js";
-import { baseUrlFromEnv, cacheTtlMs, ConfigError, envValue, loadConfig, timeoutMsFromEnv } from "./config.js";
+import { baseUrlFromEnv, cacheTtlMs, ConfigError, envValue, limitsFromEnv, loadConfig, timeoutMsFromEnv } from "./config.js";
 import { describeInstallation } from "./installation.js";
 import { createServer } from "./server.js";
 import { createWriteContext } from "./tools/write.js";
@@ -53,6 +53,7 @@ export function createHttpApp({ env = process.env, fetch: fetchImpl, idleMs = 30
   const baseUrl = baseUrlFromEnv(env); // throws ConfigError at startup for a bad URL
   const timeoutMs = timeoutMsFromEnv(env);
   const cacheMs = cacheTtlMs(env, { strict: true });
+  const limits = limitsFromEnv(env); // per company and key, like the cache
   const token = envValue(env, "METAKOCKA_HTTP_TOKEN");
   const allowedHosts = allowedHostnames(env, host);
   const writeSettings = writeSettingsFromEnv(env); // throws ConfigError at startup for a bad value
@@ -65,7 +66,7 @@ export function createHttpApp({ env = process.env, fetch: fetchImpl, idleMs = 30
     const key = createHash("sha256").update(`${baseUrl}\0${companyId}\0${secretKey}`).digest("hex");
     let tenant = tenants.get(key);
     if (!tenant) {
-      const client = new MetakockaClient({ companyId, secretKey, baseUrl, timeoutMs, fetch: fetchImpl, userAgent: `metakocka-mcp/${VERSION} (http)` });
+      const client = new MetakockaClient({ companyId, secretKey, baseUrl, timeoutMs, limits, fetch: fetchImpl, userAgent: `metakocka-mcp/${VERSION} (http)` });
       const cache = new TtlCache(cacheMs);
       // Per company and key, like the cache: one tenant can never see or commit another's drafts.
       const write = writeSettings ? createWriteContext(writeSettings, { logToStderr: true }) : undefined;

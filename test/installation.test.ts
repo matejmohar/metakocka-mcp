@@ -92,4 +92,18 @@ describe("config", () => {
     expect(() => loadConfig({ ...creds, METAKOCKA_CACHE_SECONDS: "5 min" })).toThrow(/METAKOCKA_CACHE_SECONDS/);
     expect(() => loadConfig({ ...creds, METAKOCKA_CACHE_SECONDS: "-1" })).toThrow(ConfigError);
   });
+
+  it("reads the concurrency limits", () => {
+    expect(loadConfig(creds).limits).toEqual({ maxConcurrent: 2, maxConcurrentSearch: 1, queueTimeoutMs: 300_000 });
+    expect(
+      loadConfig({ ...creds, METAKOCKA_MAX_CONCURRENT: "5", METAKOCKA_MAX_CONCURRENT_SEARCH: "2", METAKOCKA_QUEUE_TIMEOUT_SECONDS: "60" }).limits,
+    ).toEqual({ maxConcurrent: 5, maxConcurrentSearch: 2, queueTimeoutMs: 60_000 });
+    // Searches can never outnumber the overall limit.
+    expect(loadConfig({ ...creds, METAKOCKA_MAX_CONCURRENT: "1", METAKOCKA_MAX_CONCURRENT_SEARCH: "3" }).limits.maxConcurrentSearch).toBe(1);
+    // The extension passes an empty setting as its placeholder.
+    expect(loadConfig({ ...creds, METAKOCKA_MAX_CONCURRENT: "${user_config.max_concurrent}" }).limits.maxConcurrent).toBe(2);
+    expect(() => loadConfig({ ...creds, METAKOCKA_MAX_CONCURRENT: "0" })).toThrow(/METAKOCKA_MAX_CONCURRENT/);
+    expect(() => loadConfig({ ...creds, METAKOCKA_MAX_CONCURRENT_SEARCH: "1.5" })).toThrow(/METAKOCKA_MAX_CONCURRENT_SEARCH/);
+    expect(() => loadConfig({ ...creds, METAKOCKA_QUEUE_TIMEOUT_SECONDS: "never" })).toThrow(/METAKOCKA_QUEUE_TIMEOUT_SECONDS/);
+  });
 });

@@ -1,14 +1,23 @@
 name: Release
-# Push a tag like v0.3.0 (use `npm version minor`) to build the .mcpb,
-# create a GitHub release and, if the NPM_TOKEN secret is set, publish to npm
-# (with provenance when the repository is public).
+# Releases the version in package.json when it has no GitHub release yet:
+# builds the .mcpb, tags the commit v<version>, creates the GitHub release and,
+# if the NPM_TOKEN secret is set, publishes to npm (with provenance when the
+# repository is public). Runs on every push to main, so merging a version bump
+# (`npm version minor`) is all a release takes; pushing a v* tag still works too.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
   id-token: write
+
+# A version bump pushed together with its tag starts two runs: the second waits and then skips.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -18,23 +27,46 @@ jobs:
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v7
+      - name: Check whether this version is released
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$(node -p "require('./package.json').version")"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "$tag" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $tag"
+            exit 1
+          fi
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$tag is already released; nothing to do."
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-node@v7
+        if: steps.version.outputs.release == 'true'
         with:
           node-version: 22
           cache: npm
           registry-url: https://registry.npmjs.org
       - run: npm ci
-      - name: Check tag matches package version
-        run: test "v$(node -p "require('./package.json').version")" = "${GITHUB_REF_NAME}"
+        if: steps.version.outputs.release == 'true'
       - run: npm run typecheck
+        if: steps.version.outputs.release == 'true'
       - run: npm test
+        if: steps.version.outputs.release == 'true'
       - run: npm run pack:mcpb
+        if: steps.version.outputs.release == 'true'
       - name: Create GitHub release
+        if: steps.version.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release/*.mcpb --title "$GITHUB_REF_NAME" --generate-notes
+          TAG: ${{ steps.version.outputs.tag }}
+        # Creates the tag on this commit when it doesn't exist yet.
+        run: gh release create "$TAG" release/*.mcpb --target "$GITHUB_SHA" --title "$TAG" --generate-notes
       - name: Publish to npm
-        if: ${{ env.NPM_TOKEN != '' }}
+        if: ${{ steps.version.outputs.release == 'true' && env.NPM_TOKEN != '' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           # npm only generates provenance for public repositories.
@@ -46,5 +78,5 @@ jobs:
             npm publish --access public
           fi
       - name: Skip npm
-        if: ${{ env.NPM_TOKEN == '' }}
+        if: ${{ steps.version.outputs.release == 'true' && env.NPM_TOKEN == '' }}
         run: echo "::notice::Not published to npm — add an NPM_TOKEN repository secret to publish."
