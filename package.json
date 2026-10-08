@@ -1,6 +1,6 @@
 {
   "name": "metakocka-mcp",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Model Context Protocol (MCP) server for the Metakocka ERP — let Claude and other AI assistants read your documents, invoices, products, stock and partners.",
   "keywords": [
     "mcp",
