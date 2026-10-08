@@ -26,6 +26,12 @@ describe("doctor", () => {
     expect(output).toContain("Installation: main.metakocka.si (public)");
     expect(output).toContain("Connected to main.metakocka.si (1 warehouse visible)");
     expect(output).toContain("Document search works (400 ms)");
+    expect(output).toContain("Requests at once: 2, of which searches: 1");
+  });
+
+  it("shows configured concurrency limits", async () => {
+    const { output } = await check(WORKING, { ...env, METAKOCKA_MAX_CONCURRENT: "4", METAKOCKA_MAX_CONCURRENT_SEARCH: "2" });
+    expect(output).toContain("Requests at once: 4, of which searches: 2");
   });
 
   it("warns when searches are slow", async () => {

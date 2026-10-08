@@ -71,6 +71,8 @@ export async function runDoctor({ env = process.env, fetch: fetchImpl, log = con
     try {
       const config = loadConfig(env);
       pass(`Credentials found (company ID ${config.companyId})`);
+      const { maxConcurrent, maxConcurrentSearch } = config.limits;
+      pass(`Requests at once: ${maxConcurrent}, of which searches: ${maxConcurrentSearch}`);
       client = new MetakockaClient({ ...config, maxRetries: 0, fetch: fetchImpl });
     } catch (error) {
       if (!(error instanceof ConfigError)) throw error;
