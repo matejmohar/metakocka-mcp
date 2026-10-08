@@ -462,11 +462,14 @@ npm version minor --no-git-tag-version # bumps package.json, manifest.json and s
 ```
 
 Commit that and get it onto `main` (directly or through a pull request). On every push to `main`, the Release workflow
-checks whether the version in `package.json` has a GitHub release yet; if not, it runs the tests, builds the `.mcpb`,
-tags the commit `v<version>`, creates the GitHub release and publishes to npm. Pushing a `v*` tag yourself
+checks whether the version in `package.json` is on GitHub releases and on npm yet; if not, it runs the tests, builds
+the `.mcpb`, tags the commit `v<version>`, creates the GitHub release and publishes to npm. Pushing a `v*` tag yourself
 (`npm version minor && git push --follow-tags`) still works, and a version that is already released is skipped.
-Publishing to npm needs an `NPM_TOKEN` repository secret; without it that step is skipped with a notice. npm provenance
-is added automatically once the repository is public.
+
+Publishing to npm uses [trusted publishing](https://docs.npmjs.com/trusted-publishers): no npm token, the workflow
+signs in with its GitHub identity. On npmjs.com, the package's Settings → Trusted publishing must list GitHub Actions
+with `matejmohar/metakocka-mcp` and the workflow `release.yml`. npm adds provenance on its own once the repository is
+public.
 
 The **Live API check** workflow runs `npm run test:live` every morning against a real Metakocka company, to catch API
 changes on Metakocka's side. It needs the `METAKOCKA_COMPANY_ID` and `METAKOCKA_SECRET_KEY` repository secrets (use a
