@@ -458,11 +458,13 @@ src/
 ### Releasing
 
 ```sh
-npm version minor      # bumps package.json, manifest.json and src/version.ts, commits and tags
-git push --follow-tags # the Release workflow builds the .mcpb, creates the GitHub release, publishes to npm
+npm version minor --no-git-tag-version # bumps package.json, manifest.json and src/version.ts
 ```
 
-Only push the tag when you want to release: the Release workflow then creates a GitHub release with the `.mcpb`.
+Commit that and get it onto `main` (directly or through a pull request). On every push to `main`, the Release workflow
+checks whether the version in `package.json` has a GitHub release yet; if not, it runs the tests, builds the `.mcpb`,
+tags the commit `v<version>`, creates the GitHub release and publishes to npm. Pushing a `v*` tag yourself
+(`npm version minor && git push --follow-tags`) still works, and a version that is already released is skipped.
 Publishing to npm needs an `NPM_TOKEN` repository secret; without it that step is skipped with a notice. npm provenance
 is added automatically once the repository is public.
 
