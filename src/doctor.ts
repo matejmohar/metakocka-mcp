@@ -37,8 +37,8 @@ export async function runDoctor({ env = process.env, fetch: fetchImpl, log = con
   };
 
   const nodeMajor = Number(process.versions.node.split(".")[0]);
-  if (nodeMajor >= 20) pass(`Node.js ${process.versions.node}`);
-  else fail(`Node.js ${process.versions.node} is too old`, "Install Node.js 20 or newer from https://nodejs.org");
+  if (nodeMajor >= 22) pass(`Node.js ${process.versions.node}`);
+  else fail(`Node.js ${process.versions.node} is too old`, "Install Node.js 22 or newer from https://nodejs.org");
 
   let installationOk = true;
   try {

@@ -23,11 +23,10 @@ jobs:
   release:
     runs-on: ubuntu-latest
     env:
-      # Job-level so step conditions can see it. setup-node exports a placeholder
-      # NODE_AUTH_TOKEN, so checking that one would always look "set".
+      # Job-level so step conditions can see it: `if:` can't read secrets directly.
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check whether this version is released
         id: version
         env:
@@ -45,7 +44,7 @@ jobs:
           else
             echo "release=true" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: steps.version.outputs.release == 'true'
         with:
           node-version: 22
