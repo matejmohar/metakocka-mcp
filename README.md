@@ -181,6 +181,9 @@ newer version exists.
 | `METAKOCKA_BASE_URL` | no | `https://main.metakocka.si/rest/eshop/v1` — see [Other Metakocka installations](#other-metakocka-installations) |
 | `NODE_EXTRA_CA_CERTS` | no | CA certificate (PEM file) for an installation with a company or self-signed certificate |
 | `METAKOCKA_TIMEOUT_MS` | no | `30000` (or `METAKOCKA_TIMEOUT_SECONDS`) |
+| `METAKOCKA_MAX_CONCURRENT` | no | `2` — requests sent to Metakocka at the same time, of any kind |
+| `METAKOCKA_MAX_CONCURRENT_SEARCH` | no | `1` — searches at the same time (document, product and stock lists, bank statements, exports); never more than `METAKOCKA_MAX_CONCURRENT` |
+| `METAKOCKA_QUEUE_TIMEOUT_SECONDS` | no | `300` — how long a request waits for a free slot before it fails |
 | `METAKOCKA_CACHE_SECONDS` | no | `300` — how long warehouses and partner lookups are reused; `0` turns caching off |
 | `METAKOCKA_PDF_DIR` | no | `Downloads/Metakocka` — where `get_document_pdf`, `get_proof_of_delivery` and `accounting_export` save files |
 | `METAKOCKA_USER_EMAIL` | no | E-mail of a Metakocka user, which `check_blacklist` and `draft_complaint` send when Metakocka asks who is making the call |
@@ -404,7 +407,10 @@ In HTTP mode, writing also requires `METAKOCKA_HTTP_TOKEN`; drafts are kept per 
 ## How it works
 
 - Every request goes directly from your computer to Metakocka's API. Nothing passes through a third-party server.
-- Requests are sent one at a time (Metakocka processes searches per company sequentially anyway) and
+- At most 2 requests go to Metakocka at once, and only 1 of them can be a search (Metakocka processes searches per
+  company sequentially anyway, and a large one can slow the installation down). Lookups by ID and saving documents
+  don't wait behind a running search. Change the limits with `METAKOCKA_MAX_CONCURRENT` and
+  `METAKOCKA_MAX_CONCURRENT_SEARCH`; in HTTP mode they apply per company. Requests are
   retried automatically on network errors and temporary server errors. Warehouses and partner lookups are cached
   for a few minutes, and long reports send progress updates to clients that show them.
 - Responses are trimmed to the useful fields and numbers/dates are normalised, so the assistant uses less context

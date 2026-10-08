@@ -9,6 +9,7 @@
  */
 
 import { DEFAULT_BASE_URL } from "./installation.js";
+import { type CallKind, type ConcurrencyLimits, DEFAULT_LIMITS, kindOf, QueueTimeoutError, RequestLimiter } from "./limits.js";
 
 export { DEFAULT_BASE_URL };
 
@@ -26,6 +27,8 @@ export interface MetakockaClientOptions {
   /** Injected for tests, to skip backoff delays. */
   sleep?: (ms: number) => Promise<void>;
   userAgent?: string;
+  /** How many requests run at once (overall and searches). Defaults to 2 and 1. */
+  limits?: ConcurrencyLimits;
 }
 
 export interface CallOptions {
@@ -36,6 +39,12 @@ export interface CallOptions {
   idempotent?: boolean;
   /** Overrides the client's timeout for this call (writes can take much longer than reads). */
   timeoutMs?: number;
+  /**
+   * Whether the call counts against the search limit. Defaults by endpoint
+   * (see SEARCH_ENDPOINTS); pass "direct" for a search that can only match a
+   * few records, like a lookup by document number.
+   */
+  kind?: CallKind;
 }
 
 export class MetakockaError extends Error {
@@ -71,10 +80,11 @@ export class MetakockaClient {
   private readonly userAgent: string;
   /**
    * Metakocka runs searches for one company strictly in sequence on its side,
-   * so sending them in parallel only makes them queue there and time out.
-   * We queue locally instead.
+   * so sending many in parallel only makes them queue there and time out, and
+   * a few large ones can slow the whole installation. Requests wait here for a
+   * free slot instead.
    */
-  private queue: Promise<unknown> = Promise.resolve();
+  private readonly limiter: RequestLimiter;
 
   constructor(options: MetakockaClientOptions) {
     if (!options.companyId) throw new MetakockaError("Missing Metakocka company ID");
@@ -88,6 +98,11 @@ export class MetakockaClient {
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.userAgent = options.userAgent ?? "metakocka-mcp";
+    this.limiter = new RequestLimiter(options.limits ?? DEFAULT_LIMITS);
+  }
+
+  get limits(): ConcurrencyLimits {
+    return this.limiter.limits;
   }
 
   /**
@@ -95,8 +110,10 @@ export class MetakockaClient {
    * `call("json/product_list", {...})`. Credentials are added automatically.
    */
   call<T = Json>(endpoint: string, params: Json = {}, options: CallOptions = {}): Promise<T> {
-    return this.enqueue(() =>
-      this.withRetries(() => this.callOnce<T>(endpoint, params, options.timeoutMs), options.idempotent ?? true),
+    const kind = options.kind ?? kindOf(endpoint);
+    return this.withRetries(
+      () => this.limited(kind, endpoint, () => this.callOnce<T>(endpoint, params, options.timeoutMs)),
+      options.idempotent ?? true,
     );
   }
 
@@ -105,14 +122,17 @@ export class MetakockaClient {
    * `application/json` answer is an error and is thrown like any other.
    */
   callBinary(endpoint: string, params: Json = {}): Promise<BinaryResponse> {
-    return this.enqueue(() => this.withRetries(() => this.callBinaryOnce(endpoint, params), true));
+    return this.withRetries(() => this.limited(kindOf(endpoint), endpoint, () => this.callBinaryOnce(endpoint, params)), true);
   }
 
-  private enqueue<T>(run: () => Promise<T>): Promise<T> {
-    const result = this.queue.then(run, run);
-    // Keep the queue going whether this call succeeds or fails.
-    this.queue = result.catch(() => undefined);
-    return result;
+  /** One attempt holds a slot; the wait before a retry doesn't. */
+  private async limited<T>(kind: CallKind, endpoint: string, attempt: () => Promise<T>): Promise<T> {
+    try {
+      return await this.limiter.run(kind, endpoint, attempt);
+    } catch (error) {
+      if (error instanceof QueueTimeoutError) throw new MetakockaError(error.message);
+      throw error;
+    }
   }
 
   private async withRetries<T>(once: () => Promise<T>, idempotent: boolean): Promise<T> {
