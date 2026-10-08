@@ -71,4 +71,6 @@ jobs:
         # Authenticates with this workflow's OIDC identity: the package's settings on npmjs.com must list
         # matejmohar/metakocka-mcp and release.yml as a trusted publisher. npm adds provenance on its own
         # when the repository is public.
-        run: npm publish --access public
+        run: |
+          npm --version
+          npm publish --access public

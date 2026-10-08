@@ -13,6 +13,13 @@
   "license": "MIT",
   "author": "Matej Mohar <matej@mohar.dev>",
   "homepage": "https://martej.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/matejmohar/metakocka-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/matejmohar/metakocka-mcp/issues"
+  },
   "type": "module",
   "bin": {
     "metakocka-mcp": "dist/index.js"
