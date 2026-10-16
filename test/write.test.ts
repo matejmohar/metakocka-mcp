@@ -1491,6 +1491,76 @@ describe("changing partners and products", () => {
     const sent = f.calls.find((c) => c.endpoint === "json/product_update")!.body;
     expect(sent).toMatchObject({ mk_id: "P1", safety_stock: "5", pricelist: [{ count_code: "1", price_def: [{ amount_from: "0", amount_to: null, tax: "EX4", price: "40" }] }] });
   });
+
+  it("switches a product between service and goods, showing the value Metakocka has now", async () => {
+    const products = PRODUCTS.map((p) => ({ ...p }));
+    const f = metakocka({
+      products,
+      handlers: {
+        "json/product_update": (body) => {
+          const p = products.find((x) => x.mk_id === body.mk_id) as Record<string, unknown>;
+          if (body.service !== undefined) p.service = body.service;
+          return { opr_code: "0", mk_id: body.mk_id };
+        },
+      },
+    });
+    const { client } = await connect(f, { write: quiet(RECORDS) });
+    // Unchanged: says so instead of drafting an empty change.
+    expect(parse(await client.callTool({ name: "draft_product_update", arguments: { product_id: "P1", service: true } }))).toMatch(/Nothing to change: service: Svetovanje is already a service \(storitev\)/);
+    const unchanged = parse(await client.callTool({ name: "draft_product_update", arguments: { product_id: "P1", service: true, safety_stock: 1 } }));
+    expect(unchanged.summary).not.toMatch(/storitev/);
+    expect(unchanged.warnings).toContain("service: Svetovanje is already a service (storitev); left as it is.");
+
+    const toGoods = parse(await client.callTool({ name: "draft_product_update", arguments: { product_id: "P1", service: false } }));
+    expect(toGoods.summary).toBe(
+      "Spremeni IZDELEK Svetovanje (šifra SVC-H)\n  vrsta: storitev → blago\n\nObstoječi dokumenti (računi, prevzemnice ipd.) se s tem ne spremenijo.",
+    );
+    const toService = parse(await client.callTool({ name: "draft_product_update", arguments: { product_id: "P7", service: true, language: "en" } }));
+    expect(toService.summary).toBe("Change PRODUCT Domene (code DOM)\n  type: goods → service\n\nExisting documents (invoices, acceptance notes etc.) are not changed by this.");
+
+    const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: toGoods.draft_id } }));
+    expect(r).toMatchObject({ status: "created", mk_id: "P1", warnings: [] });
+    expect(f.calls.find((c) => c.endpoint === "json/product_update")!.body).toMatchObject({ mk_id: "P1", service: "false" });
+    expect(products[0]!.service).toBe("false");
+  });
+
+  it("reports Metakocka's reason when it refuses to switch service / goods, and sends the confirmation only on a confirmed redraft", async () => {
+    const products = PRODUCTS.map((p) => ({ ...p }));
+    const f = metakocka({
+      products,
+      handlers: {
+        "json/product_update": (body) => {
+          if (body.confirm_save_change_product_service !== "true") {
+            return { opr_code: "1", opr_desc_app: "Artikel je že uporabljen na dokumentih. Potrdite spremembo in preračun zaloge." };
+          }
+          (products.find((x) => x.mk_id === body.mk_id) as Record<string, unknown>).service = body.service;
+          return { opr_code: "0", mk_id: body.mk_id };
+        },
+      },
+    });
+    const { client } = await connect(f, { write: quiet(RECORDS) });
+    const body = parse(await client.callTool({ name: "draft_product_update", arguments: { product_id: "P7", service: true } }));
+    expect(body.summary).toContain("vrsta: blago → storitev");
+    const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
+    expect(r.status).toBe("rejected");
+    expect(r.message).toContain("Artikel je že uporabljen na dokumentih. Potrdite spremembo in preračun zaloge.");
+    expect(r.message).toMatch(/nothing was changed/);
+    expect(r.message).toMatch(/ask whether they still want to change it.*confirm_service_change: true/);
+    expect(f.calls.find((c) => c.endpoint === "json/product_update")!.body).not.toHaveProperty("confirm_save_change_product_service");
+    expect(products.find((p) => p.mk_id === "P7")!.service).toBe("false");
+
+    // The user confirmed: a new draft says so in its summary and sends the confirmation.
+    const confirmed = parse(await client.callTool({ name: "draft_product_update", arguments: { product_id: "P7", service: true, confirm_service_change: true } }));
+    expect(confirmed.summary).toBe(
+      "Spremeni IZDELEK Domene (šifra DOM)\n  vrsta: blago → storitev\n\n" +
+        "Obstoječi dokumenti (računi, prevzemnice ipd.) se s tem ne spremenijo.\n" +
+        "Potrjeno, čeprav je izdelek morda že uporabljen na dokumentih: Metakocka bo zalogo preračunala.",
+    );
+    const ok = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: confirmed.draft_id } }));
+    expect(ok).toMatchObject({ status: "created", mk_id: "P7", warnings: [] });
+    expect(f.calls.filter((c) => c.endpoint === "json/product_update").at(-1)!.body).toMatchObject({ mk_id: "P7", service: "true", confirm_save_change_product_service: "true" });
+    expect(products.find((p) => p.mk_id === "P7")!.service).toBe("true");
+  });
 });
 
 describe("shipping, complaints and messages", () => {

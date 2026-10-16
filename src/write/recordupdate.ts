@@ -1,7 +1,8 @@
 /**
  * Changes to existing register entries: a partner's data (update_partner) or
  * a product's (json/product_update), including its sales price when it has a
- * single, untiered price list entry. Only the fields given change; the
+ * single, untiered price list entry, and whether it is a service or goods.
+ * Only the fields given change; the
  * summary shows each old and new value, and the entry is read back afterwards.
  */
 import { listAllProducts, type MkRecord } from "../api.js";
@@ -37,6 +38,10 @@ export interface ProductUpdateInput {
   safety_stock?: number;
   minimal_order_quantity?: number;
   weight_kg?: number;
+  /** true = service (storitev), false = goods (blago). */
+  service?: boolean;
+  /** Confirms a service / goods change on a product already used on documents (Metakocka then recalculates stock). */
+  confirm_service_change?: boolean;
   /** New net sales price on the product's one price list entry. */
   price?: number;
   language?: "sl" | "en";
@@ -50,8 +55,13 @@ interface Change {
 
 const show = (v: string | undefined, sl: boolean) => (v === undefined || v === "" ? (sl ? "(prazno)" : "(empty)") : v);
 
-function summary(head: string, changes: Change[], installation: string | undefined, sl: boolean): string {
-  return [head, ...changes.map((c) => `  ${c.label}: ${show(c.from, sl)} → ${show(c.to, sl)}`), ...(installation ? ["", `Metakocka: ${installation}`] : [])].join("\n");
+function summary(head: string, changes: Change[], installation: string | undefined, sl: boolean, notes: string[] = []): string {
+  return [
+    head,
+    ...changes.map((c) => `  ${c.label}: ${show(c.from, sl)} → ${show(c.to, sl)}`),
+    ...(notes.length ? ["", ...notes] : []),
+    ...(installation ? ["", `Metakocka: ${installation}`] : []),
+  ].join("\n");
 }
 
 export async function buildPartnerUpdateDraft(ctx: BuildContext, input: PartnerUpdateInput): Promise<{ draft: Draft; warnings: string[] }> {
@@ -176,6 +186,40 @@ export async function buildProductUpdateDraft(ctx: BuildContext, input: ProductU
     changes.push({ label: f.label, from: f.now, to });
   }
 
+  // Service or goods: the old value is what Metakocka has now, never assumed.
+  const notes: string[] = [];
+  let rejectedHint: string | undefined;
+  if (input.service !== undefined) {
+    const kind = (service: boolean) => (service ? (sl ? "storitev" : "service") : sl ? "blago" : "goods");
+    const now = str(product.service) === undefined ? undefined : bool(product.service);
+    if (now === input.service) {
+      warnings.push(`service: ${str(product.name)} is already ${input.service ? "a service (storitev)" : "goods (blago)"}; left as it is.`);
+    } else {
+      payload.service = String(input.service);
+      changes.push({ label: sl ? "vrsta" : "type", from: now === undefined ? undefined : kind(now), to: kind(input.service) });
+      notes.push(
+        sl
+          ? "Obstoječi dokumenti (računi, prevzemnice ipd.) se s tem ne spremenijo."
+          : "Existing documents (invoices, acceptance notes etc.) are not changed by this.",
+      );
+      if (input.confirm_service_change) {
+        // Metakocka asks for this when the product is already used on documents.
+        payload.confirm_save_change_product_service = "true";
+        notes.push(
+          sl
+            ? "Potrjeno, čeprav je izdelek morda že uporabljen na dokumentih: Metakocka bo zalogo preračunala."
+            : "Confirmed even though the product may already be used on documents: Metakocka will recalculate stock.",
+        );
+      } else {
+        rejectedHint =
+          "If Metakocka refused because the product is already used on documents (it asks to confirm the change and " +
+          "recalculate stock): tell the user why, and ask whether they still want to change it. Only if they do, call " +
+          "draft_product_update again with the same values and confirm_service_change: true, show that summary, and commit it.";
+      }
+    }
+  }
+  if (input.confirm_service_change && payload.service === undefined) warnings.push("confirm_service_change only applies together with a changed service; ignored.");
+
   let priceCheck: { pricelist: string; price: number } | undefined;
   if (input.price !== undefined) {
     if (input.price < 0) throw new DraftError("The price can't be negative.");
@@ -200,7 +244,7 @@ export async function buildProductUpdateDraft(ctx: BuildContext, input: ProductU
       priceCheck = { pricelist, price: input.price };
     }
   }
-  if (!changes.length) throw new DraftError("Nothing to change: give at least one new value.");
+  if (!changes.length) throw new DraftError(warnings.length ? `Nothing to change: ${warnings.join(" ")}` : "Nothing to change: give at least one new value.");
   if (input.active === false) warnings.push("An inactive product can't be used on new documents.");
 
   const name = str(product.name);
@@ -214,9 +258,9 @@ export async function buildProductUpdateDraft(ctx: BuildContext, input: ProductU
     payload,
     summary: "",
     target: { docType: "product", mkId: input.product_id, number: str(product.code) },
-    change: { endpoint: "json/product_update", check: (client) => checkProduct(client, input.product_id!, payload, priceCheck) },
+    change: { endpoint: "json/product_update", check: (client) => checkProduct(client, input.product_id!, payload, priceCheck), rejectedHint },
   });
-  draft.summary = summary(`${sl ? "Spremeni IZDELEK" : "Change PRODUCT"} ${name} (${sl ? "šifra" : "code"} ${str(product.code) ?? "?"})`, changes, ctx.installation, sl);
+  draft.summary = summary(`${sl ? "Spremeni IZDELEK" : "Change PRODUCT"} ${name} (${sl ? "šifra" : "code"} ${str(product.code) ?? "?"})`, changes, ctx.installation, sl, notes);
   return { draft, warnings };
 }
 
@@ -230,7 +274,7 @@ async function checkProduct(client: MetakockaClient, id: string, payload: MkReco
   const p = await readProduct(client, id);
   if (!p) return { done: false };
   // product_list doesn't return every field (e.g. safety_stock); those can't be checked here.
-  const fields = Object.keys(payload).filter((k) => k !== "mk_id" && k !== "pricelist" && (p[k] !== undefined || payload[k] === "$REMOVE_STRING_VALUE$"));
+  const fields = Object.keys(payload).filter((k) => !["mk_id", "pricelist", "confirm_save_change_product_service"].includes(k) && (p[k] !== undefined || payload[k] === "$REMOVE_STRING_VALUE$"));
   const wrong = fields.filter((k) => {
     const want = String(payload[k]);
     if (want === "$REMOVE_STRING_VALUE$") return !!str(p[k]);

@@ -177,7 +177,7 @@ All good — the server is ready to use.
 | `draft_credit_note` | A credit note (dobropis) to an invoice: returned goods, a financial correction, or standalone. |
 | `draft_stock_document` | A purchase order, packing list, delivery or receiving order, goods received note, transfer between warehouses or work order. |
 | `draft_partner` / `draft_product` | A new partner or product that isn't in Metakocka yet. |
-| `draft_partner_update` / `draft_product_update` | A change to a partner's data, or to a product (e.g. its price or safety stock). |
+| `draft_partner_update` / `draft_product_update` | A change to a partner's data, or to a product (e.g. its price, safety stock, or whether it is a service or goods). |
 | `draft_payment` | A payment on an existing invoice, offer or order (mark it paid, a supplier paid, a prepayment or a refund). |
 | `draft_update` | A change Metakocka's API allows on an existing order (status, tracking code, shipping date, invoicing it), invoice (status) or warehouse document. |
 | `draft_shipping` | Delivery labels, marking orders shipped, or a group expedition. |

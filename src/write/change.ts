@@ -32,6 +32,8 @@ export interface ChangeSpec {
   manualCheck?: string;
   /** What the audit log records instead of the payload (e.g. without attached files). */
   logPayload?: MkRecord;
+  /** Added to the message when Metakocka refuses the change: what the user can do next. */
+  rejectedHint?: string;
 }
 
 export async function commitChange(ctx: CommitContext, draft: Draft): Promise<CommitOutcome> {
@@ -47,7 +49,7 @@ export async function commitChange(ctx: CommitContext, draft: Draft): Promise<Co
     if (error instanceof MetakockaError && error.oprCode !== undefined) {
       draft.status = "open";
       await ctx.journal({ ...base, event: "failed", error: message });
-      return { status: "rejected", message: `Metakocka refused it; nothing was changed: ${message}` };
+      return { status: "rejected", message: `Metakocka refused it; nothing was changed: ${message}${spec.rejectedHint ? ` ${spec.rejectedHint}` : ""}` };
     }
     draft.status = "unknown";
     await ctx.journal({ ...base, event: "unknown", error: message });
@@ -61,7 +63,7 @@ export async function commitChange(ctx: CommitContext, draft: Draft): Promise<Co
     draft.status = "open";
     const message = error instanceof Error ? error.message : String(error);
     await ctx.journal({ ...base, event: "failed", error: message, response });
-    return { status: "rejected", message };
+    return { status: "rejected", message: spec.rejectedHint ? `${message} ${spec.rejectedHint}` : message };
   }
   return finish(ctx, draft, interpreted, [...(interpreted.warnings ?? [])]);
 }
