@@ -452,7 +452,8 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           "Prepare a change to an existing product WITHOUT saving it: name, description, unit, barcode, active, sales / " +
           "purchasing, service or goods (storitev / blago), safety stock (varnostna zaloga), minimum order quantity, weight, or its sales price (only when it has " +
           "one untiered sales price in EUR). Only the fields given change. Metakocka may refuse some changes (e.g. service / " +
-          "goods) for a product already used on documents; existing documents are never changed. Returns a draft_id and a summary: show it, then commit_document.",
+          "goods) for a product already used on documents; existing documents are never changed. A refused service / goods " +
+          "change can be retried with confirm_service_change, but only after the user confirms. Returns a draft_id and a summary: show it, then commit_document.",
         inputSchema: z.object({
           product_id: z.string().min(1).describe("The product's Metakocka id (from search_products)."),
           name: z.string().max(200).optional(),
@@ -466,6 +467,10 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           minimal_order_quantity: z.number().min(0).optional(),
           weight_kg: z.number().min(0).optional(),
           service: z.boolean().optional().describe("true for a service (storitev), false for goods (blago)."),
+          confirm_service_change: z
+            .boolean()
+            .optional()
+            .describe("Only after Metakocka refused a service change and the user confirmed they still want it: Metakocka then changes it and recalculates stock."),
           price: z.number().min(0).optional().describe("New net sales price in EUR."),
           language: z.enum(["sl", "en"]).default("sl").describe("Language of the summary the user confirms."),
         }),
