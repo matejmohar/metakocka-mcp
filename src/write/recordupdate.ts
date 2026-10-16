@@ -1,7 +1,8 @@
 /**
  * Changes to existing register entries: a partner's data (update_partner) or
  * a product's (json/product_update), including its sales price when it has a
- * single, untiered price list entry. Only the fields given change; the
+ * single, untiered price list entry, and whether it is a service or goods.
+ * Only the fields given change; the
  * summary shows each old and new value, and the entry is read back afterwards.
  */
 import { listAllProducts, type MkRecord } from "../api.js";
@@ -37,6 +38,8 @@ export interface ProductUpdateInput {
   safety_stock?: number;
   minimal_order_quantity?: number;
   weight_kg?: number;
+  /** true = service (storitev), false = goods (blago). */
+  service?: boolean;
   /** New net sales price on the product's one price list entry. */
   price?: number;
   language?: "sl" | "en";
@@ -50,8 +53,13 @@ interface Change {
 
 const show = (v: string | undefined, sl: boolean) => (v === undefined || v === "" ? (sl ? "(prazno)" : "(empty)") : v);
 
-function summary(head: string, changes: Change[], installation: string | undefined, sl: boolean): string {
-  return [head, ...changes.map((c) => `  ${c.label}: ${show(c.from, sl)} → ${show(c.to, sl)}`), ...(installation ? ["", `Metakocka: ${installation}`] : [])].join("\n");
+function summary(head: string, changes: Change[], installation: string | undefined, sl: boolean, notes: string[] = []): string {
+  return [
+    head,
+    ...changes.map((c) => `  ${c.label}: ${show(c.from, sl)} → ${show(c.to, sl)}`),
+    ...(notes.length ? ["", ...notes] : []),
+    ...(installation ? ["", `Metakocka: ${installation}`] : []),
+  ].join("\n");
 }
 
 export async function buildPartnerUpdateDraft(ctx: BuildContext, input: PartnerUpdateInput): Promise<{ draft: Draft; warnings: string[] }> {
@@ -176,6 +184,24 @@ export async function buildProductUpdateDraft(ctx: BuildContext, input: ProductU
     changes.push({ label: f.label, from: f.now, to });
   }
 
+  // Service or goods: the old value is what Metakocka has now, never assumed.
+  const notes: string[] = [];
+  if (input.service !== undefined) {
+    const kind = (service: boolean) => (service ? (sl ? "storitev" : "service") : sl ? "blago" : "goods");
+    const now = str(product.service) === undefined ? undefined : bool(product.service);
+    if (now === input.service) {
+      warnings.push(`service: ${str(product.name)} is already ${input.service ? "a service (storitev)" : "goods (blago)"}; left as it is.`);
+    } else {
+      payload.service = String(input.service);
+      changes.push({ label: sl ? "vrsta" : "type", from: now === undefined ? undefined : kind(now), to: kind(input.service) });
+      notes.push(
+        sl
+          ? "Obstoječi dokumenti (računi, prevzemnice ipd.) se s tem ne spremenijo."
+          : "Existing documents (invoices, acceptance notes etc.) are not changed by this.",
+      );
+    }
+  }
+
   let priceCheck: { pricelist: string; price: number } | undefined;
   if (input.price !== undefined) {
     if (input.price < 0) throw new DraftError("The price can't be negative.");
@@ -200,7 +226,7 @@ export async function buildProductUpdateDraft(ctx: BuildContext, input: ProductU
       priceCheck = { pricelist, price: input.price };
     }
   }
-  if (!changes.length) throw new DraftError("Nothing to change: give at least one new value.");
+  if (!changes.length) throw new DraftError(warnings.length ? `Nothing to change: ${warnings.join(" ")}` : "Nothing to change: give at least one new value.");
   if (input.active === false) warnings.push("An inactive product can't be used on new documents.");
 
   const name = str(product.name);
@@ -216,7 +242,7 @@ export async function buildProductUpdateDraft(ctx: BuildContext, input: ProductU
     target: { docType: "product", mkId: input.product_id, number: str(product.code) },
     change: { endpoint: "json/product_update", check: (client) => checkProduct(client, input.product_id!, payload, priceCheck) },
   });
-  draft.summary = summary(`${sl ? "Spremeni IZDELEK" : "Change PRODUCT"} ${name} (${sl ? "šifra" : "code"} ${str(product.code) ?? "?"})`, changes, ctx.installation, sl);
+  draft.summary = summary(`${sl ? "Spremeni IZDELEK" : "Change PRODUCT"} ${name} (${sl ? "šifra" : "code"} ${str(product.code) ?? "?"})`, changes, ctx.installation, sl, notes);
   return { draft, warnings };
 }
 
