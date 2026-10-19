@@ -338,13 +338,17 @@ export function priceLine(l: {
   };
 }
 
+/**
+ * VAT is worked out once per rate on the sum of that rate's net amounts, as Metakocka's per-rate totals
+ * (sum_tax_ex4, …) and suppliers' invoices do; rounding it per line can be a cent off (2 × 11,47 € at 22 %
+ * is 5,05 € of VAT, not 2 × 2,52 €).
+ */
 export function totalsOf(lines: DraftLine[], currency = "EUR"): DraftTotals {
-  return {
-    net: round2(lines.reduce((s, l) => s + l.net, 0)),
-    tax: round2(lines.reduce((s, l) => s + l.tax, 0)),
-    gross: round2(lines.reduce((s, l) => s + l.gross, 0)),
-    currency,
-  };
+  const netByRate = new Map<number, number>();
+  for (const l of lines) netByRate.set(l.taxRatePercent, (netByRate.get(l.taxRatePercent) ?? 0) + l.net);
+  const net = round2(lines.reduce((s, l) => s + l.net, 0));
+  const tax = round2([...netByRate].reduce((s, [rate, base]) => s + round2((round2(base) * rate) / 100), 0));
+  return { net, tax, gross: round2(net + tax), currency };
 }
 
 /** put_document finds products by code / count_code; mk_id alone leaves it "not found". */

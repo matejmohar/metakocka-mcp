@@ -845,6 +845,22 @@ describe("purchase invoices", () => {
     expect(parse((await draft(client, AVANT)).result)).toMatch(/126-039951 from AVANT.SI d.o.o. is already in Metakocka/);
   });
 
+  it("works out VAT on each rate's total, as the supplier's invoice does, not line by line", async () => {
+    const { client } = await connect(metakocka({ partners: [SUPPLIER] }), { write: write() });
+    // 2 × 11,47 € at 22 %: 5,05 € of VAT on 22,94 €, where rounding each line would give 2 × 2,52 €.
+    const { body } = await draft(client, {
+      ...AVANT,
+      supplier_invoice_number: "126-044216",
+      invoice_date: "2026-09-30",
+      invoice_total: 27.99,
+      lines: [
+        { code: "DOM", quantity: 1, price: 16.38, discount_percent: 29.98, vat_percent: 22, description: "dokumentni.si" },
+        { code: "DOM", quantity: 1, price: 17.29, discount_percent: 33.66, vat_percent: 22, description: "dokumentni.net" },
+      ],
+    });
+    expect(body.totals).toEqual({ net: 22.94, tax: 5.05, gross: 27.99, currency: "EUR" });
+  });
+
   it("refuses what doesn't add up or isn't there", async () => {
     const fake = metakocka({
       partners: [SUPPLIER, FOREIGN_SUPPLIER],
