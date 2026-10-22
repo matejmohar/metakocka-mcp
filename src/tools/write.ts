@@ -17,7 +17,7 @@ import { describeInstallation } from "../installation.js";
 import { commitDraft, resolveUnknown } from "../write/commit.js";
 import { DraftStore, type Draft } from "../write/drafts.js";
 import { createJournal, type Journal } from "../write/journal.js";
-import { DraftError, DESCRIPTION_MAX, sameSummary } from "../write/document.js";
+import { DraftError, DESCRIPTION_MAX, FREE_TEXT_NAME_MAX, sameSummary } from "../write/document.js";
 import { buildInvoiceDraft, type InvoiceInfo, type InvoiceInput } from "../write/invoice.js";
 import { buildOfferDraft, buildOrderDraft, type OfferInput, type OrderInput } from "../write/offer.js";
 import { buildPaymentDraft, PAYABLE_TYPES, type PaymentInput } from "../write/payment.js";
@@ -118,6 +118,7 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
     purchases && "purchase_bill_domestic / purchase_bill_foreign = prejeti račun from a domestic / foreign supplier",
   ].filter(Boolean).join("; ");
   const forDates = [invoices && "Invoices", purchases && "purchase invoices"].filter(Boolean).join(" and ");
+  const salesDocs = [offers && "Offers", invoices && "sales invoices"].filter(Boolean).join(" and ");
 
   /** Where a missing partner or product sends the user, depending on what may be added here. */
   const missingHint = (error: unknown) => {
@@ -140,7 +141,8 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           ? `${purchases ? `On ${[offers && "offers", orders && "orders", invoices && "invoices"].filter(Boolean).join(" and ")}, prices` : "Prices"} and VAT come from Metakocka's price list unless a price is given. `
           : "") +
         (offers || invoices
-          ? `On ${[offers && "offers", invoices && "sales invoices"].filter(Boolean).join(" and ")} a line can carry a description (its text on the document). `
+          ? `On ${[offers && "offers", invoices && "sales invoices"].filter(Boolean).join(" and ")} a line can carry a description (its text on the document); ` +
+            "a line with name and unit instead of a product is a free-text line (prosti vnos), and a line with only a title is a section header. "
           : "") +
         (orders
           ? "A sales order can carry the customer's own order number (buyer_order), a delivery date, a delivery type and " +
@@ -198,6 +200,22 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
                     "give it to charge another rate." +
                     (purchases ? " Purchase invoices: required, as on the invoice (e.g. 22, 9.5, 0)." : ""),
                 ),
+              ...(offers || invoices
+                ? {
+                    name: z
+                      .string()
+                      .max(FREE_TEXT_NAME_MAX)
+                      .optional()
+                      .describe(`${salesDocs}: a free-text line (prosti vnos) with this name instead of a product; give unit, quantity, price and vat_percent.`),
+                    unit: z.string().max(20).optional().describe("Free-text lines: unit of measure as in Metakocka's register, e.g. kos, ura, mesec."),
+                    title: z
+                      .string()
+                      .min(1)
+                      .max(DESCRIPTION_MAX)
+                      .optional()
+                      .describe(`${salesDocs}: a section header (opisna vrstica) with this heading instead of a product; give nothing else on that line.`),
+                  }
+                : {}),
               ...(offers || invoices || purchases
                 ? {
                     description: z
@@ -206,7 +224,7 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
                       .optional()
                       .describe(
                         [
-                          (offers || invoices) && `${[offers && "Offers", invoices && "sales invoices"].filter(Boolean).join(" and ")}: the line's text on the document (e.g. the site or period), max ${DESCRIPTION_MAX} characters.`,
+                          (offers || invoices) && `${salesDocs}: the line's text on the document (e.g. the site or period), max ${DESCRIPTION_MAX} characters.`,
                           purchases && "Purchase invoices: the line's text on the invoice (e.g. a period or domain), max 200 characters.",
                         ]
                           .filter(Boolean)
@@ -291,6 +309,9 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
         };
         const misplaced = Object.keys(allowed).filter((k) => a[k] !== undefined && !allowed[k]!.includes(kind));
         if (kind === "order" && a.lines?.some((l) => l.description !== undefined)) misplaced.push("lines[].description");
+        for (const field of ["name", "unit", "title"]) {
+          if ((kind === "order" || kind === "purchase") && a.lines?.some((l) => l[field] !== undefined)) misplaced.push(`lines[].${field}`);
+        }
         if (misplaced.length) throw new DraftError(`${misplaced.join(", ")}: not for ${a.doc_type}.`);
         const longText = kind === "purchase" ? a.lines?.findIndex((l) => typeof l.description === "string" && l.description.length > 200) ?? -1 : -1;
         if (longText >= 0) throw new DraftError(`Line ${longText + 1}: the description is longer than 200 characters.`);
@@ -317,7 +338,11 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           expires_at: new Date(draft.expiresAt).toISOString(),
           summary: draft.summary,
           partner: draft.partner,
-          lines: draft.lines.map((l) => ({ product_id: l.productId, code: l.code, name: l.name, description: l.description, quantity: l.quantity, unit: l.unit, price: l.price, discount_percent: l.discountPercent, vat_percent: l.taxRatePercent, net: l.net, total: l.gross })),
+          lines: draft.lines.map((l) =>
+            l.header !== undefined
+              ? { title: l.header }
+              : { product_id: l.productId, code: l.code, name: l.name, free_text: l.freeText, description: l.description, quantity: l.quantity, unit: l.unit, price: l.price, discount_percent: l.discountPercent, vat_percent: l.taxRatePercent, net: l.net, total: l.gross },
+          ),
           totals: draft.totals,
           ...info,
           warnings,

@@ -287,8 +287,8 @@ describe("draft_document", () => {
     expect(await err({ lines: [{ product_id: "P4", quantity: 1 }] })).toMatch(/not marked for sale/);
     expect(await err({ lines: [{ product_id: "P5", quantity: 1, price: 10 }] })).toMatch(/no sales price in EUR/);
     expect(await err({ lines: [{ product_id: "P1" }] })).toMatch(/quantity/);
-    // Metakocka's put_document has no description-only lines: every row is looked up (or created) as a product.
-    expect(await err({ lines: [{ product_id: "P1", quantity: 1 }, { text: "Uvod" }] })).toMatch(/Line 2: .*no description-only lines/);
+    // A line is a product, a free-text line (name) or a section header (title); text alone is neither.
+    expect(await err({ lines: [{ product_id: "P1", quantity: 1 }, { text: "Uvod" }] })).toMatch(/Line 2: give a product \(product_id or code\), name and unit for a free-text line, or title/);
     expect(fake.puts()).toHaveLength(0);
   });
 
@@ -725,7 +725,7 @@ describe("invoices", () => {
     expect(fake.puts()[0]!.body).toMatchObject({ offer_list: [{ count_code: "4/2026" }], partner: { mk_id: "400068941553" }, duo_payment: "13.10.2026" });
 
     expect(parse((await draft(client, { doc_type: "sales_bill_domestic", from_offer: "4/2026", partner_id: "OTHER" })).result)).toMatch(/for another partner/);
-    expect(parse((await draft(client, { doc_type: "sales_bill_domestic", from_offer: "5/2026" })).result)).toMatch(/line 1 \(Prosta vrstica\) is not a product/);
+    expect(parse((await draft(client, { doc_type: "sales_bill_domestic", from_offer: "5/2026" })).result)).toMatch(/line 1 \(Prosta vrstica\) is a free-text line, and Metakocka's API doesn't return its unit/);
     expect(parse((await draft(client, { doc_type: "sales_bill_domestic", from_offer: "99/2026" })).result)).toMatch(/No offer 99\/2026/);
     expect(parse((await draft(client, { ...DOMESTIC, from_offer: "4/2026" })).result)).toMatch(/either lines or from_offer/);
   });
@@ -1889,7 +1889,7 @@ describe("e-mail attachments", () => {
   });
 });
 
-describe("line descriptions on sales documents", () => {
+describe("line descriptions, free-text lines and section headers on sales documents", () => {
   const SALES: WriteSettings = {
     docTypes: ["sales_offer", "sales_order", "sales_bill_domestic", "purchase_bill_domestic"],
     confirm: "never",
@@ -1897,17 +1897,21 @@ describe("line descriptions on sales documents", () => {
   };
   const write = () => quiet(SALES);
   const withTerm = partner({ partner_delivery_address_list: [{ mk_id: "400079138037", street: "Glavna 1", post_number: "1000", city: "Ljubljana", country: "Slovenia", payment_due_days: "8" }] });
-  const DESCRIBED = {
+  /** A section header as put_document takes it. */
+  const HEADER = (title: string, tax = "000") => ({ name: "", name_desc: title, doc_desc: title, unit: "kos", amount: "0", price: "0", discount: "0", tax });
+  /** A section header as get_document returns one made in Metakocka's form. */
+  const STORED_HEADER = (title: string) => ({ name: "", name_desc: title, amount: "0", price: "0", discount: "0", tax: "000", doc_desc: title });
+  const MIXED = {
     doc_type: "sales_offer",
     partner_id: "400068941553",
     lines: [
+      { title: "Svetovanje" },
       { product_id: "P1", quantity: 3, description: "Kronotop Hostel" },
-      { product_id: "P1", quantity: 1, description: " Bovec\nBreakfast " },
-      { code: "SVC-D", quantity: 1 },
+      { name: "Ureditev DNS zapisov", unit: "ura", quantity: 2, price: 40, vat_percent: 22, description: " Kronotop\nHostel " },
+      { title: "Dokumentacija" },
+      { code: "SVC-D", quantity: 1, discount_percent: 10 },
     ],
   };
-  /** A section header as Metakocka's own form stores it. */
-  const HEADER = (title: string) => ({ name: "", name_desc: title, doc_desc: title, amount: "0", price: "0", discount: "0", tax: "000" });
 
   it("a described product line: its text goes to doc_desc and into the summary", async () => {
     const fake = metakocka();
@@ -1922,46 +1926,94 @@ describe("line descriptions on sales documents", () => {
     ]);
   });
 
-  it("described and plain lines together: in order, totals unchanged, the summary shows each description", async () => {
+  it("a free-text line: its own name, unit, price and VAT, sent without a product, as the live test saved it", async () => {
     const fake = metakocka();
     const { client } = await connect(fake, { write: write() });
-    const { body } = await draft(client, DESCRIBED);
-    expect(body.totals).toEqual({ net: 160, tax: 35.2, gross: 195.2, currency: "EUR" });
+    const { body } = await draft(client, { ...OFFER, lines: [{ name: "Ureditev DNS zapisov", unit: "ura", quantity: 2, price: 40, vat_percent: 22, description: "Kronotop Hostel" }] });
+    expect(body.lines).toEqual([
+      expect.objectContaining({ name: "Ureditev DNS zapisov", free_text: true, unit: "ura", quantity: 2, price: 40, vat_percent: 22, net: 80, total: 97.6, description: "Kronotop Hostel" }),
+    ]);
+    expect(body.lines[0].product_id).toBeUndefined();
+    expect(body.totals).toEqual({ net: 80, tax: 17.6, gross: 97.6, currency: "EUR" });
+    expect(body.summary).toMatch(/\n {2}1\. 2 ura × Ureditev DNS zapisov \(Kronotop Hostel\) à 40,00 € = 80,00 €\n/);
+    const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
+    expect(r.warnings).toEqual([]);
+    expect(fake.puts()[0]!.body.product_list).toEqual([
+      { name: "Ureditev DNS zapisov", unit: "ura", amount: "2", price: "40", discount: "0", tax: "EX4", doc_desc: "Kronotop Hostel" },
+    ]);
+  });
+
+  it("a section header: empty name, its heading in name_desc and doc_desc, a unit, 0 amount, price and discount", async () => {
+    const fake = metakocka();
+    const { client } = await connect(fake, { write: write() });
+    const { body } = await draft(client, { ...OFFER, lines: [{ title: "Spletne strani + e-pošta" }, { product_id: "P1", quantity: 1 }] });
+    expect(body.lines).toEqual([{ title: "Spletne strani + e-pošta" }, expect.objectContaining({ product_id: "P1", quantity: 1 })]);
+    expect(body.totals).toEqual({ net: 35, tax: 7.7, gross: 42.7, currency: "EUR" });
+    await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } });
+    expect(fake.puts()[0]!.body.product_list).toEqual([
+      HEADER("Spletne strani + e-pošta"),
+      { mk_id: "P1", code: "SVC-H", count_code: "1", amount: "1", price: "35", discount: "0", tax: "EX4" },
+    ]);
+
+    // Without a single 0 % code in the catalogue a header takes the first line's code.
+    const noZero = metakocka({ products: PRODUCTS.filter((p) => p.code !== "SUPPORT") });
+    const { client: c2 } = await connect(noZero, { write: write() });
+    const { body: b2 } = await draft(c2, { ...OFFER, lines: [{ title: "Uvod" }, { product_id: "P1", quantity: 1 }] });
+    await c2.callTool({ name: "commit_document", arguments: { draft_id: b2.draft_id } });
+    expect((noZero.puts()[0]!.body.product_list as Body[])[0]).toEqual(HEADER("Uvod", "EX4"));
+  });
+
+  it("a mixed document keeps the lines in order; headers add nothing to the totals; the summary shows it all in that order", async () => {
+    const fake = metakocka();
+    const { client } = await connect(fake, { write: write() });
+    const { body } = await draft(client, MIXED);
+    expect(body.totals).toEqual({ net: 203, tax: 44.66, gross: 247.66, currency: "EUR" });
     expect(body.summary).toBe(
       [
         "Ustvari PONUDBO za ACME d.o.o. (SI12345678)",
         "Glavna 1, 1000 Ljubljana, Slovenia",
         "",
         "Postavke:",
+        "  ▸ Svetovanje",
         "  1. 3 × Svetovanje (Kronotop Hostel) à 35,00 € = 105,00 €",
-        "  2. 1 × Svetovanje (Bovec Breakfast) à 35,00 € = 35,00 €",
-        "  3. 1 × Dokumentacija à 20,00 € = 20,00 €",
+        "  2. 2 ura × Ureditev DNS zapisov (Kronotop Hostel) à 40,00 € = 80,00 €",
+        "  ▸ Dokumentacija",
+        "  3. 1 × Dokumentacija à 20,00 € −10 % = 18,00 €",
         "",
-        "Osnova: 160,00 €",
-        "DDV: 35,20 €",
-        "Skupaj z DDV: 195,20 €",
+        "Osnova: 203,00 €",
+        "DDV: 44,66 €",
+        "Skupaj z DDV: 247,66 €",
         "",
         "Datum 2026-10-05 · velja 30 dni",
       ].join("\n"),
     );
     const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
     expect(r.warnings).toEqual([]);
-    expect((fake.puts()[0]!.body.product_list as Body[]).map((l) => [l.code, l.doc_desc])).toEqual([
-      ["SVC-H", "Kronotop Hostel"],
-      ["SVC-H", "Bovec\nBreakfast"],
-      ["SVC-D", undefined],
+    expect((fake.puts()[0]!.body.product_list as Body[]).map((l) => [l.code ?? l.name, l.doc_desc, l.amount])).toEqual([
+      ["", "Svetovanje", "0"],
+      ["SVC-H", "Kronotop Hostel", "3"],
+      ["Ureditev DNS zapisov", "Kronotop\nHostel", "2"],
+      ["", "Dokumentacija", "0"],
+      ["SVC-D", undefined, "1"],
     ]);
   });
 
-  it("a stored description that differs from the confirmed one is flagged", async () => {
-    const fake = metakocka({ stored: (put) => ({ ...storedFrom(put), product_list: (storedFrom(put).product_list as Body[]).map((l) => ({ ...l, doc_desc: l.doc_desc ? String(l.doc_desc).slice(0, 5) : undefined })) }) });
+  it("flags a stored line that differs from the confirmed one: its text, a header that isn't one, a free-text line made a product", async () => {
+    const fake = metakocka({
+      stored: (put) => ({
+        ...storedFrom(put),
+        product_list: (put.product_list as Body[]).map((l, i) =>
+          i === 0 ? { ...l, name: "Svetovanje" } : i === 1 ? { ...l, doc_desc: "Krono" } : i === 2 ? { ...l, mk_id: "NEWPROD", code: "NEW" } : l,
+        ),
+      }),
+    });
     const { client } = await connect(fake, { write: write() });
-    const { body } = await draft(client, DESCRIBED);
+    const { body } = await draft(client, MIXED);
     const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
-    expect(r.warnings[0]).toMatch(/CHECK IN METAKOCKA.*line 1 description "Krono", not "Kronotop Hostel"/);
+    expect(r.warnings[0]).toMatch(/CHECK IN METAKOCKA.*line 1 is "Svetovanje", not a section header.*line 2 text "Krono", not "Kronotop Hostel".*line 3 has product NEW/);
   });
 
-  it("refuses descriptions on sales orders and over the limit; purchase invoices keep 200 characters", async () => {
+  it("refuses free-text lines, headers and descriptions where they don't belong, and incomplete or mixed lines", async () => {
     const fake = metakocka();
     const { client } = await connect(fake, { write: write() });
     const err = async (args: Record<string, unknown>) => {
@@ -1969,73 +2021,115 @@ describe("line descriptions on sales documents", () => {
       expect(result.isError).toBe(true);
       return String(body);
     };
+    const offer = (line: Record<string, unknown>) => ({ ...OFFER, lines: [{ product_id: "P1", quantity: 1 }, line] });
+    const FREE = { name: "Ureditev DNS", unit: "ura", quantity: 2, price: 40, vat_percent: 22 };
+    // Purchase invoices and sales orders take none of these.
+    const PURCHASE = { doc_type: "purchase_bill_domestic", partner_id: "400068941553" };
+    expect(await err({ ...PURCHASE, lines: [{ title: "Domene" }] })).toMatch(/lines\[\]\.title: not for purchase_bill_domestic/);
+    expect(await err({ ...PURCHASE, lines: [FREE] })).toMatch(/lines\[\]\.name, lines\[\]\.unit: not for purchase_bill_domestic/);
+    expect(await err({ ...OFFER, doc_type: "sales_order", lines: [{ title: "Domene" }, { product_id: "P1", quantity: 1 }] })).toMatch(/lines\[\]\.title: not for sales_order/);
+    expect(await err({ ...OFFER, doc_type: "sales_order", lines: [FREE] })).toMatch(/lines\[\]\.name, lines\[\]\.unit: not for sales_order/);
     expect(await err({ ...OFFER, doc_type: "sales_order", lines: [{ product_id: "P1", quantity: 1, description: "x" }] })).toMatch(/lines\[\]\.description: not for sales_order/);
-    expect(await err({ ...OFFER, lines: [{ product_id: "P1", quantity: 1, description: "x".repeat(701) }] })).toMatch(/700/);
-    // Still a product line: it needs its product and quantity.
-    expect(await err({ ...OFFER, lines: [{ description: "Uvod" }] })).toMatch(/Line 1: .*no description-only lines/);
-    expect(await err({ ...OFFER, lines: [{ product_id: "P1", description: "Uvod" }] })).toMatch(/Line 1: quantity must be more than 0/);
-    expect(await err({ doc_type: "purchase_bill_domestic", partner_id: "400068941553", lines: [{ code: "DOM", quantity: 1, price: 1, vat_percent: 22, description: "x".repeat(201) }] })).toMatch(
-      /Line 1: the description is longer than 200 characters/,
-    );
+    // A header is only a heading.
+    for (const [field, value] of [["quantity", 1], ["price", 10], ["discount_percent", 5], ["vat_percent", 22], ["description", "x"], ["unit", "kos"]] as const) {
+      expect(await err(offer({ title: "Domene", [field]: value }))).toMatch(new RegExp(`Line 2: a section header \\(title\\) takes no ${field}; it is only a heading`));
+    }
+    expect(await err(offer({ title: "  " }))).toMatch(/Line 2: the title is empty/);
+    expect(await err({ ...OFFER, lines: [{ title: "Domene" }] })).toMatch(/needs at least one product or free-text line; section headers alone/);
+    // One kind per line.
+    expect(await err(offer({ title: "Domene", product_id: "P2", quantity: 1 }))).toMatch(/Line 2: give only one of a product \(product_id or code\), name \(a free-text line\) or title/);
+    expect(await err(offer({ ...FREE, code: "SVC-D" }))).toMatch(/Line 2: give only one of/);
+    expect(await err(offer({ ...FREE, title: "Domene" }))).toMatch(/Line 2: give only one of/);
+    expect(await err(offer({ quantity: 1 }))).toMatch(/Line 2: give a product \(product_id or code\), name and unit for a free-text line, or title/);
+    // A product line needs its quantity, and has its own unit.
+    expect(await err(offer({ product_id: "P2" }))).toMatch(/Line 2: quantity must be more than 0/);
+    expect(await err(offer({ product_id: "P2", quantity: 1, unit: "ura" }))).toMatch(/Line 2: unit is only for free-text lines/);
+    // A free-text line needs everything a price list would otherwise give.
+    expect(await err(offer({ ...FREE, unit: undefined }))).toMatch(/Line 2: a free-text line needs unit/);
+    expect(await err(offer({ ...FREE, quantity: undefined }))).toMatch(/Line 2: quantity must be more than 0/);
+    expect(await err(offer({ ...FREE, price: undefined }))).toMatch(/Line 2: a free-text line needs its price/);
+    expect(await err(offer({ ...FREE, vat_percent: undefined }))).toMatch(/Line 2: a free-text line needs vat_percent/);
+    expect(await err(offer({ ...FREE, vat_percent: 5 }))).toMatch(/Line 2: no price list uses a tax code with 5 % VAT/);
+    expect(await err(offer({ ...FREE, name: " " }))).toMatch(/Line 2: the name is empty/);
+    // Longer than Metakocka's limits.
+    expect(await err(offer({ product_id: "P2", quantity: 1, description: "x".repeat(701) }))).toMatch(/700/);
+    expect(await err(offer({ title: "x".repeat(701) }))).toMatch(/700/);
+    expect(await err(offer({ ...FREE, name: "x".repeat(201) }))).toMatch(/200/);
+    expect(await err({ ...PURCHASE, lines: [{ code: "DOM", quantity: 1, price: 1, vat_percent: 22, description: "x".repeat(201) }] })).toMatch(/Line 1: the description is longer than 200 characters/);
     expect(fake.puts()).toHaveLength(0);
-    const { body } = await draft(client, { ...OFFER, lines: [{ product_id: "P1", quantity: 1, description: "x".repeat(700) }] });
+    // At the limits it drafts.
+    const { body } = await draft(client, offer({ ...FREE, name: "x".repeat(200), description: "x".repeat(700) }));
     expect(body.draft_id).toBeDefined();
   });
 
-  it("an invoice from an offer keeps each line's description; an offer with a section header is refused", async () => {
+  it("an invoice from an offer keeps its section headers and line descriptions; a free-text line is refused (no unit to copy)", async () => {
     const offer = {
       mk_id: "OF1",
       doc_type: "sales_offer",
       count_code: "1/2026",
       partner: { mk_id: "400068941553", mk_address_id: "400079138037", customer: "ACME d.o.o." },
       currency_code: "EUR",
+      // As get_document returns an offer made in Metakocka's form.
       product_list: [
+        STORED_HEADER("Spletne strani + e-pošta"),
         { mk_id: "P1", code: "SVC-H", name: "Svetovanje", name_desc: "Dolg opis artikla", amount: "12", price: "25", tax: "EX4", doc_desc: "Kronotop Hostel" },
         { mk_id: "P1", code: "SVC-H", name: "Svetovanje", amount: "12", price: "25", discount: "60", tax: "EX4", doc_desc: "Forthventure, samo e-pošta" },
+        STORED_HEADER("Dokumentacija"),
         { mk_id: "P2", code: "SVC-D", name: "Dokumentacija", amount: "1", price: "20", tax: "EX4" },
       ],
     };
-    const withHeader = { ...offer, mk_id: "OF2", count_code: "2/2026", product_list: [HEADER("Spletne strani + e-pošta"), ...offer.product_list] };
+    const freeText = {
+      ...offer,
+      mk_id: "OF2",
+      count_code: "2/2026",
+      product_list: [...offer.product_list, { name: "Ureditev DNS zapisov", name_desc: "Kronotop Hostel", amount: "2", price: "40", discount: "0", tax: "EX4", doc_desc: "Kronotop Hostel" }],
+    };
     const fake = metakocka({
       partners: [withTerm],
-      documents: { OF1: offer, OF2: withHeader },
+      documents: { OF1: offer, OF2: freeText },
       search: (body) => {
-        const hit = [offer, withHeader].find((o) => body.doc_type === "sales_offer" && o.count_code === body.query);
+        const hit = [offer, freeText].find((o) => body.doc_type === "sales_offer" && o.count_code === body.query);
         return hit ? { opr_code: "0", result: [hit] } : { opr_code: "0", result_all_records: "0", result: [] };
       },
     });
     const { client } = await connect(fake, { write: write() });
     const { body } = await draft(client, { doc_type: "sales_bill_domestic", from_offer: "1/2026", language: "en" });
     expect(body.lines).toEqual([
+      { title: "Spletne strani + e-pošta" },
       expect.objectContaining({ product_id: "P1", description: "Kronotop Hostel", quantity: 12, net: 300 }),
       expect.objectContaining({ product_id: "P1", description: "Forthventure, samo e-pošta", discount_percent: 60, net: 120 }),
+      { title: "Dokumentacija" },
       expect.objectContaining({ product_id: "P2", quantity: 1, net: 20 }),
     ]);
-    expect(body.lines[2].description).toBeUndefined();
+    expect(body.lines[4].description).toBeUndefined();
+    expect(body.totals).toEqual({ net: 440, tax: 96.8, gross: 536.8, currency: "EUR" });
     expect(body.summary).toContain(
       [
         "Lines:",
+        "  ▸ Spletne strani + e-pošta",
         "  1. 12 × Svetovanje (Kronotop Hostel) à 25.00 € = 300.00 €",
         "  2. 12 × Svetovanje (Forthventure, samo e-pošta) à 25.00 € −60 % = 120.00 €",
+        "  ▸ Dokumentacija",
         "  3. 1 × Dokumentacija à 20.00 € = 20.00 €",
       ].join("\n"),
     );
     const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
     expect(r.warnings).toEqual([]);
     expect(fake.puts()[0]!.body.product_list).toEqual([
+      HEADER("Spletne strani + e-pošta"),
       { mk_id: "P1", code: "SVC-H", count_code: "1", amount: "12", price: "25", discount: "0", tax: "EX4", doc_desc: "Kronotop Hostel" },
       { mk_id: "P1", code: "SVC-H", count_code: "1", amount: "12", price: "25", discount: "60", tax: "EX4", doc_desc: "Forthventure, samo e-pošta" },
+      HEADER("Dokumentacija"),
       { mk_id: "P2", code: "SVC-D", count_code: "2", amount: "1", price: "20", discount: "0", tax: "EX4" },
     ]);
 
-    // Metakocka's put_document refuses a line without a product, so such an offer is refused before drafting.
     const refused = await draft(client, { doc_type: "sales_bill_domestic", from_offer: "2/2026" });
     expect(refused.result.isError).toBe(true);
-    expect(String(refused.body)).toMatch(/Offer 2\/2026, line 1 \(\?\) is not a product from the catalogue, and Metakocka's API takes only products/);
+    expect(String(refused.body)).toMatch(/Offer 2\/2026, line 6 \(Ureditev DNS zapisov\) is a free-text line, and Metakocka's API doesn't return its unit of measure\. Make the invoice from lines instead/);
     expect(fake.puts()).toHaveLength(1);
   });
 
-  it("the tool describes descriptions on sales documents only when they are on", async () => {
+  it("the tool describes descriptions, free-text lines and headers on sales documents only when they are on", async () => {
     const tools = async (docTypes: WriteSettings["docTypes"]) => {
       const { client } = await connect(metakocka(), { write: quiet({ ...SALES, docTypes }) });
       const tool = (await client.listTools()).tools.find((t) => t.name === "draft_document")!;
@@ -2043,11 +2137,17 @@ describe("line descriptions on sales documents", () => {
       return { description: tool.description!, line };
     };
     const sales = await tools(["sales_offer", "sales_bill_domestic"]);
-    expect(sales.description).toMatch(/On offers and sales invoices a line can carry a description \(its text on the document\)\./);
+    expect(sales.description).toMatch(
+      /On offers and sales invoices a line can carry a description \(its text on the document\); a line with name and unit instead of a product is a free-text line \(prosti vnos\), and a line with only a title is a section header\./,
+    );
     expect(sales.line.description?.description).toBe("Offers and sales invoices: the line's text on the document (e.g. the site or period), max 700 characters.");
-    expect(sales.line.title).toBeUndefined();
+    expect(sales.line.name?.description).toMatch(/^Offers and sales invoices: a free-text line \(prosti vnos\)/);
+    expect(sales.line.title?.description).toMatch(/^Offers and sales invoices: a section header \(opisna vrstica\)/);
+    expect(sales.line.unit?.description).toMatch(/^Free-text lines: unit of measure/);
     const purchase = await tools(["purchase_bill_domestic"]);
     expect(purchase.line.description?.description).toBe("Purchase invoices: the line's text on the invoice (e.g. a period or domain), max 200 characters.");
-    expect(purchase.description).not.toMatch(/its text on the document/);
+    expect(purchase.line.name).toBeUndefined();
+    expect(purchase.line.title).toBeUndefined();
+    expect(purchase.description).not.toMatch(/free-text|section header/);
   });
 });
