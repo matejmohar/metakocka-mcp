@@ -21,7 +21,17 @@ export interface LineInput {
   discount_percent?: number;
   /** VAT rate to charge instead of the price list's (e.g. 0 for reverse charge or export, 22). */
   vat_percent?: number;
+  /** Sales documents: the line's text on the document (doc_desc). */
+  description?: string;
+  /** Sales documents: a section header instead of a product. */
+  title?: string;
 }
+
+/**
+ * Longest line description or header text. Metakocka's API docs give no limit for a document line's doc_desc;
+ * a header also goes into name_desc, documented as "char, 700" for products (docs/product_concept.md).
+ */
+export const LINE_TEXT_MAX = 700;
 
 export interface BuildContext {
   client: MetakockaClient;
@@ -182,7 +192,7 @@ export function catalogZeroTax(catalog: Map<string, CatalogProduct>): TaxFallbac
  */
 export function foreignVatWarnings(partner: ResolvedPartner, lines: DraftLine[]): string[] {
   if (!partner.foreign) return [];
-  const withVat = lines.filter((l) => l.taxRatePercent > 0);
+  const withVat = lines.filter((l) => !l.header && l.taxRatePercent > 0);
   if (withVat.length && partner.taxpayer) {
     return [`${partner.name} is a VAT-registered foreign business, yet ${withVat.length} line(s) charge VAT; within the EU that is usually reverse charge without VAT. Make sure VAT is right here.`];
   }
@@ -310,6 +320,46 @@ export function productLine(catalog: Map<string, CatalogProduct>, line: LineInpu
   return { ...priceLine({ product, quantity, price, discountPercent, taxCode, taxRatePercent }), ...(partnerDiscount ? { partnerDiscount } : {}) };
 }
 
+/**
+ * The lines of an offer or sales invoice: products, each with an optional description (doc_desc), and section
+ * headers (title), in the order given; withHeaders fills the headers in.
+ */
+export function salesLines(catalog: Map<string, CatalogProduct>, input: LineInput[], options: LineOptions = {}): (DraftLine | undefined)[] {
+  return input.map((line, i) => {
+    const n = i + 1;
+    const product = line.product_id !== undefined || line.code !== undefined;
+    if (line.title !== undefined) {
+      if (product) throw new DraftError(`Line ${n}: give either a product (product_id or code) or a title for a section header, not both.`);
+      const extra = (["quantity", "price", "discount_percent", "vat_percent", "description"] as const).filter((k) => line[k] !== undefined);
+      if (extra.length) throw new DraftError(`Line ${n}: a section header (title) takes no ${extra.join(", ")}; it is only a heading.`);
+      if (!line.title.trim()) throw new DraftError(`Line ${n}: the title is empty.`);
+      if (line.title.trim().length > LINE_TEXT_MAX) throw new DraftError(`Line ${n}: the title is longer than ${LINE_TEXT_MAX} characters.`);
+      return undefined;
+    }
+    if (!product) throw new DraftError(`Line ${n}: give a product (product_id or code), or a title for a section header.`);
+    const description = line.description?.trim() || undefined;
+    if (description && description.length > LINE_TEXT_MAX) throw new DraftError(`Line ${n}: the description is longer than ${LINE_TEXT_MAX} characters.`);
+    return { ...productLine(catalog, line, i, options), ...(description ? { description } : {}) };
+  });
+}
+
+/**
+ * Fills in salesLines' headers; refused without any product. A header carries the catalogue's 0 % tax code, as
+ * headers made in Metakocka's form do ("000"), else the first product line's code; its amounts are 0 either way.
+ */
+export function withHeaders(lines: (DraftLine | undefined)[], input: LineInput[], what: string, catalog: Map<string, CatalogProduct>): DraftLine[] {
+  const first = lines.find((l) => l !== undefined);
+  if (!first) throw new DraftError(`${what} needs at least one product line; section headers alone are not enough.`);
+  const zero = catalogZeroTax(catalog);
+  const tax = zero ? { taxCode: zero.code, taxRatePercent: 0 } : first;
+  return lines.map((l, i) => l ?? headerLine(input[i]!.title!.trim(), tax));
+}
+
+/** A section header: a line without a product, as Metakocka's own form makes it. */
+export function headerLine(title: string, tax: Pick<DraftLine, "taxCode" | "taxRatePercent">): DraftLine {
+  return { productId: "", name: title, header: title, quantity: 0, price: 0, discountPercent: 0, taxCode: tax.taxCode, taxRatePercent: tax.taxRatePercent, net: 0, tax: 0, gross: 0 };
+}
+
 /** Net, tax and gross of a line. */
 export function priceLine(l: {
   product: Pick<CatalogProduct, "id" | "code" | "productId" | "name" | "unit">;
@@ -345,23 +395,32 @@ export function priceLine(l: {
  */
 export function totalsOf(lines: DraftLine[], currency = "EUR"): DraftTotals {
   const netByRate = new Map<number, number>();
-  for (const l of lines) netByRate.set(l.taxRatePercent, (netByRate.get(l.taxRatePercent) ?? 0) + l.net);
+  // Section headers carry no amounts.
+  for (const l of lines) if (!l.header) netByRate.set(l.taxRatePercent, (netByRate.get(l.taxRatePercent) ?? 0) + l.net);
   const net = round2(lines.reduce((s, l) => s + l.net, 0));
   const tax = round2([...netByRate].reduce((s, [rate, base]) => s + round2((round2(base) * rate) / 100), 0));
   return { net, tax, gross: round2(net + tax), currency };
 }
 
-/** put_document finds products by code / count_code; mk_id alone leaves it "not found". */
+/**
+ * put_document finds products by code / count_code; mk_id alone leaves it "not found". A section header is sent
+ * as Metakocka's form stores one: no product, its text in name_desc and doc_desc, amount, price and discount 0.
+ */
 export function productListPayload(lines: DraftLine[]): MkRecord[] {
-  return lines.map((l) => ({
-    mk_id: l.productId,
-    ...(l.code ? { code: l.code } : {}),
-    ...(l.countCode ? { count_code: l.countCode } : {}),
-    amount: String(l.quantity),
-    price: String(l.price),
-    discount: String(l.discountPercent),
-    tax: l.taxCode,
-  }));
+  return lines.map((l) =>
+    l.header !== undefined
+      ? { name: "", name_desc: l.header, doc_desc: l.header, amount: "0", price: "0", discount: "0", tax: l.taxCode }
+      : {
+          mk_id: l.productId,
+          ...(l.code ? { code: l.code } : {}),
+          ...(l.countCode ? { count_code: l.countCode } : {}),
+          amount: String(l.quantity),
+          price: String(l.price),
+          discount: String(l.discountPercent),
+          tax: l.taxCode,
+          ...(l.description ? { doc_desc: l.description } : {}),
+        },
+  );
 }
 
 /** A warning when this server already saved the same kind of document to this partner for the same amount today. */
@@ -379,14 +438,19 @@ const decimal = (n: number, language: "sl" | "en") =>
 export const money = (n: number, language: "sl" | "en", currency = "EUR") =>
   `${n.toLocaleString(language === "sl" ? "sl-SI" : "en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency === "EUR" ? "€" : currency}`;
 
-/** The lines and totals block of a summary, one fact per line. */
+/** The lines and totals block of a summary, one fact per line, in the document's order; section headers are not numbered. */
 export function linesAndTotals(d: Pick<Draft, "language" | "lines" | "totals">): string[] {
   const sl = d.language === "sl";
   const m = (n: number) => money(n, d.language, d.totals.currency);
   const t = sl ? { lines: "Postavke", net: "Osnova", tax: "DDV", gross: "Skupaj z DDV" } : { lines: "Lines", net: "Net", tax: "VAT", gross: "Total incl. VAT" };
+  let n = 0;
   return [
     `${t.lines}:`,
-    ...d.lines.map((l, i) => `  ${i + 1}. ${decimal(l.quantity, d.language)} × ${l.name} à ${m(l.price)}${l.discountPercent ? ` −${decimal(l.discountPercent, d.language)} %` : ""} = ${m(l.net)}`),
+    ...d.lines.map((l) =>
+      l.header !== undefined
+        ? `  ▸ ${oneLine(l.header)}`
+        : `  ${++n}. ${decimal(l.quantity, d.language)} × ${l.name}${l.description ? ` (${oneLine(l.description)})` : ""} à ${m(l.price)}${l.discountPercent ? ` −${decimal(l.discountPercent, d.language)} %` : ""} = ${m(l.net)}`,
+    ),
     "",
     `${t.net}: ${m(d.totals.net)}`,
     `${t.tax}: ${m(d.totals.tax)}`,
