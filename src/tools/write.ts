@@ -17,7 +17,7 @@ import { describeInstallation } from "../installation.js";
 import { commitDraft, resolveUnknown } from "../write/commit.js";
 import { DraftStore, type Draft } from "../write/drafts.js";
 import { createJournal, type Journal } from "../write/journal.js";
-import { DraftError, LINE_TEXT_MAX, sameSummary } from "../write/document.js";
+import { DraftError, DESCRIPTION_MAX, sameSummary } from "../write/document.js";
 import { buildInvoiceDraft, type InvoiceInfo, type InvoiceInput } from "../write/invoice.js";
 import { buildOfferDraft, buildOrderDraft, type OfferInput, type OrderInput } from "../write/offer.js";
 import { buildPaymentDraft, PAYABLE_TYPES, type PaymentInput } from "../write/payment.js";
@@ -140,7 +140,7 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           ? `${purchases ? `On ${[offers && "offers", orders && "orders", invoices && "invoices"].filter(Boolean).join(" and ")}, prices` : "Prices"} and VAT come from Metakocka's price list unless a price is given. `
           : "") +
         (offers || invoices
-          ? `On ${[offers && "offers", invoices && "sales invoices"].filter(Boolean).join(" and ")} a line can carry a description (its text on the document), and a line with only a title is a section header. `
+          ? `On ${[offers && "offers", invoices && "sales invoices"].filter(Boolean).join(" and ")} a line can carry a description (its text on the document). `
           : "") +
         (orders
           ? "A sales order can carry the customer's own order number (buyer_order), a delivery date, a delivery type and " +
@@ -178,7 +178,7 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
             z.object({
               product_id: z.string().optional().describe("Product's Metakocka id (the `id` from search_products)."),
               code: z.string().optional().describe("Exact product code (šifra), instead of product_id."),
-              quantity: z.number().positive().max(1_000_000).optional().describe("Required on product lines."),
+              quantity: z.number().positive().max(1_000_000).optional(),
               price: z
                 .number()
                 .min(purchases ? -10_000_000 : 0)
@@ -202,26 +202,16 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
                 ? {
                     description: z
                       .string()
-                      .max(LINE_TEXT_MAX)
+                      .max(DESCRIPTION_MAX)
                       .optional()
                       .describe(
                         [
-                          (offers || invoices) && `${[offers && "Offers", invoices && "sales invoices"].filter(Boolean).join(" and ")}: the line's text on the document (e.g. the site or period), max ${LINE_TEXT_MAX} characters.`,
+                          (offers || invoices) && `${[offers && "Offers", invoices && "sales invoices"].filter(Boolean).join(" and ")}: the line's text on the document (e.g. the site or period), max ${DESCRIPTION_MAX} characters.`,
                           purchases && "Purchase invoices: the line's text on the invoice (e.g. a period or domain), max 200 characters.",
                         ]
                           .filter(Boolean)
                           .join(" "),
                       ),
-                  }
-                : {}),
-              ...(offers || invoices
-                ? {
-                    title: z
-                      .string()
-                      .min(1)
-                      .max(LINE_TEXT_MAX)
-                      .optional()
-                      .describe(`${[offers && "Offers", invoices && "sales invoices"].filter(Boolean).join(" and ")}: a section header with this heading instead of a product; give nothing else on that line.`),
                   }
                 : {}),
             }),
@@ -301,7 +291,6 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
         };
         const misplaced = Object.keys(allowed).filter((k) => a[k] !== undefined && !allowed[k]!.includes(kind));
         if (kind === "order" && a.lines?.some((l) => l.description !== undefined)) misplaced.push("lines[].description");
-        if ((kind === "order" || kind === "purchase") && a.lines?.some((l) => l.title !== undefined)) misplaced.push("lines[].title (section headers)");
         if (misplaced.length) throw new DraftError(`${misplaced.join(", ")}: not for ${a.doc_type}.`);
         const longText = kind === "purchase" ? a.lines?.findIndex((l) => typeof l.description === "string" && l.description.length > 200) ?? -1 : -1;
         if (longText >= 0) throw new DraftError(`Line ${longText + 1}: the description is longer than 200 characters.`);
@@ -328,11 +317,7 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           expires_at: new Date(draft.expiresAt).toISOString(),
           summary: draft.summary,
           partner: draft.partner,
-          lines: draft.lines.map((l) =>
-            l.header !== undefined
-              ? { title: l.header }
-              : { product_id: l.productId, code: l.code, name: l.name, description: l.description, quantity: l.quantity, unit: l.unit, price: l.price, discount_percent: l.discountPercent, vat_percent: l.taxRatePercent, net: l.net, total: l.gross },
-          ),
+          lines: draft.lines.map((l) => ({ product_id: l.productId, code: l.code, name: l.name, description: l.description, quantity: l.quantity, unit: l.unit, price: l.price, discount_percent: l.discountPercent, vat_percent: l.taxRatePercent, net: l.net, total: l.gross })),
           totals: draft.totals,
           ...info,
           warnings,

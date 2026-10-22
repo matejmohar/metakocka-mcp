@@ -163,9 +163,8 @@ export function verifyStored(draft: Draft, doc: MkRecord): string[] {
     if (!near(num(s.amount), line.quantity, 1e-6)) problems.push(`line ${n} quantity ${str(s.amount)}, not ${line.quantity}`);
     if (!unpriced && !near(num(s.price), line.price, 1e-4)) problems.push(`line ${n} price ${str(s.price)}, not ${line.price}`);
     if (!unpriced && str(s.tax) && str(s.tax) !== line.taxCode) problems.push(`line ${n} tax ${str(s.tax)}, not ${line.taxCode}`);
-    // Sales documents: a line's description and a section header's text.
-    const text = line.header ?? line.description;
-    if (text !== undefined && str(s.doc_desc)?.trim() !== text) problems.push(`line ${n} text "${str(s.doc_desc) ?? ""}", not "${text}"`);
+    // Sales documents: the line's description.
+    if (line.description !== undefined && str(s.doc_desc)?.trim() !== line.description) problems.push(`line ${n} description "${str(s.doc_desc) ?? ""}", not "${line.description}"`);
   });
   const total = num(doc.sum_all);
   if (!unpriced && total !== undefined && !near(total, draft.totals.gross, 0.01)) problems.push(`total ${total}, not ${draft.totals.gross}`);

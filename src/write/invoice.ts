@@ -17,14 +17,12 @@ import {
   duplicateWarning,
   linesAndTotals,
   oneLine,
-  headerLine,
   priceLine,
   productListPayload,
   resolveAddress,
   resolvePartner,
-  salesLines,
+  salesLine,
   totalsOf,
-  withHeaders,
   type BuildContext,
   type LineInput,
   currencyCode,
@@ -139,12 +137,12 @@ export async function buildInvoiceDraft(
     if (!input.lines?.length) throw new DraftError("An invoice needs at least one product line, or from_offer / from_order.");
     // Foreign partners: no VAT by default (reverse charge, export); a line's vat_percent charges VAT.
     const foreignTax = partner.foreign ? (await zeroTax(catalog, partnerInvoices)) ?? "unknown" : undefined;
-    lines = withHeaders(salesLines(catalog, input.lines, { foreignTax, currency, partnerDiscounts: partner.discounts }), input.lines, "An invoice", catalog);
+    lines = input.lines.map((line, i) => salesLine(catalog, line, i, { foreignTax, currency, partnerDiscounts: partner.discounts }));
     warnings.push(...partnerDiscountNotes(partner, lines, input.lines, catalog));
   }
   warnings.push(...foreignVatWarnings(partner, lines));
   const totals = totalsOf(lines, currency);
-  const withoutVat = lines.every((l) => l.header !== undefined || l.taxRatePercent === 0);
+  const withoutVat = lines.every((l) => l.taxRatePercent === 0);
 
   // Service period.
   for (const [name, value] of [["service_from", input.service_from], ["service_to", input.service_to], ["due_date", input.due_date]] as const) {
@@ -239,10 +237,7 @@ async function loadSource(ctx: BuildContext, docType: "sales_offer" | "sales_ord
   return getDocument(ctx.client, docType, id);
 }
 
-/**
- * The offer's (or order's) lines as they are on it: product, quantity, price, discount, tax code and the line's
- * description, and its section headers. `number` names it, e.g. "Offer 4/2026".
- */
+/** The offer's (or order's) lines as they are on it: product, quantity, price, discount, tax code and description. `number` names it, e.g. "Offer 4/2026". */
 function offerLines(catalog: Map<string, CatalogProduct>, offer: MkRecord, number: string): DraftLine[] {
   const rates = new Map<string, number>();
   for (const p of catalog.values()) if (p.taxCode && p.taxRatePercent !== undefined) rates.set(p.taxCode, p.taxRatePercent);
@@ -250,12 +245,6 @@ function offerLines(catalog: Map<string, CatalogProduct>, offer: MkRecord, numbe
   if (!lines.length) throw new DraftError(`${number} has no lines.`);
   return lines.map((l, i) => {
     const n = i + 1;
-    // A section header: no product, nothing to pay, only its text.
-    const heading = str(l.doc_desc)?.trim() || str(l.name_desc)?.trim();
-    if (!str(l.mk_id) && !str(l.code) && !num(l.amount) && !num(l.price) && heading) {
-      const taxCode = str(l.tax) ?? "";
-      return headerLine(heading, { taxCode, taxRatePercent: rates.get(taxCode) ?? 0 });
-    }
     const product = catalog.get(str(l.mk_id) ?? "");
     if (!product) {
       throw new DraftError(

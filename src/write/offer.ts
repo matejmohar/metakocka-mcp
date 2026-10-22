@@ -22,9 +22,8 @@ import {
   resolveAddress,
   receiverPayload,
   resolvePartner,
-  salesLines,
+  salesLine,
   totalsOf,
-  withHeaders,
   type BuildContext,
   type LineInput,
 } from "./document.js";
@@ -81,12 +80,7 @@ async function buildSalesDraft(
   if (!input.lines.length) throw new DraftError(`${offer ? "An offer" : "A sales order"} needs at least one product line.`);
   // Foreign partners: no VAT by default (reverse charge, export); a line's vat_percent charges VAT.
   const foreignTax = partner.foreign ? catalogZeroTax(catalog) ?? "unknown" : undefined;
-  const lines = withHeaders(
-    salesLines(catalog, input.lines, { foreignTax, currency, partnerDiscounts: partner.discounts }),
-    input.lines,
-    offer ? "An offer" : "A sales order",
-    catalog,
-  );
+  const lines = input.lines.map((line, i) => salesLine(catalog, line, i, { foreignTax, currency, partnerDiscounts: partner.discounts }));
   warnings.push(...foreignVatWarnings(partner, lines), ...partnerDiscountNotes(partner, lines, input.lines, catalog));
   const totals = totalsOf(lines, currency);
 

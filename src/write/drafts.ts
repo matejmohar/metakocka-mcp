@@ -20,7 +20,6 @@ export type DraftStatus =
   | "discarded";
 
 export interface DraftLine {
-  /** Empty on a section header. */
   productId: string;
   code?: string;
   /** Metakocka's product number (count_code). */
@@ -39,8 +38,6 @@ export interface DraftLine {
   partnerDiscount?: string;
   /** Sales documents: the line's text on the document (doc_desc). */
   description?: string;
-  /** Sales documents: a section header without a product (its heading); quantity, price and amounts are 0. */
-  header?: string;
 }
 
 export interface DraftTotals {

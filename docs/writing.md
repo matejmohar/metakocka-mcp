@@ -157,11 +157,11 @@ Partner discounts: a partner's discounts per product category (popusti partnerja
 list — the best matching category, replacing the price list's own discount only where Metakocka marks the partner
 discount so. Lines with a price given by hand get none, and the draft says when one would have applied.
 
-Line descriptions and section headers: on offers and sales invoices a product line can carry a description (its text
-on the document, up to 700 characters), and a line with only a `title` is a section header, saved as Metakocka's own
-form saves one. An invoice made from an offer keeps both.
+Line descriptions: on offers and sales invoices a line can carry a description (its text on the document, up to 700
+characters). An invoice made from an offer keeps them.
 
 Not supported yet: products with tiered or several prices when changing a price.
-Other lines must be products. Only the fields Metakocka's API allows can be changed, and nothing can be deleted.
+Lines must be products (Metakocka's API takes no lines without one, such as section headers). Only the fields
+Metakocka's API allows can be changed, and nothing can be deleted.
 
 In HTTP mode, writing also requires `METAKOCKA_HTTP_TOKEN`; drafts are kept per company and key.
