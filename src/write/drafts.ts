@@ -36,6 +36,12 @@ export interface DraftLine {
   gross: number;
   /** The category whose partner discount this line got. */
   partnerDiscount?: string;
+  /** Sales documents: the line's text on the document (doc_desc). */
+  description?: string;
+  /** Sales documents: a free-text line (prosti vnos) without a catalogue product; productId is empty, name and unit are its own. */
+  freeText?: boolean;
+  /** Sales documents: a section header (opisna vrstica) without a product; quantity, price and amounts are 0. */
+  header?: string;
 }
 
 export interface DraftTotals {
