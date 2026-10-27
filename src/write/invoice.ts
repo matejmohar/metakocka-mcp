@@ -139,7 +139,7 @@ export async function buildInvoiceDraft(
     if (!input.lines?.length) throw new DraftError("An invoice needs at least one product line, or from_offer / from_order.");
     // Foreign partners: no VAT by default (reverse charge, export); a line's vat_percent charges VAT.
     const foreignTax = partner.foreign ? (await zeroTax(catalog, partnerInvoices)) ?? "unknown" : undefined;
-    lines = withHeaders(salesLines(catalog, input.lines, { foreignTax, currency, partnerDiscounts: partner.discounts }), input.lines, "An invoice", catalog);
+    lines = withHeaders(salesLines(catalog, input.lines, { foreignTax, currency, partnerDiscounts: partner.discounts }), input.lines, "An invoice");
     warnings.push(...partnerDiscountNotes(partner, lines, input.lines, catalog));
   }
   warnings.push(...foreignVatWarnings(partner, lines));
@@ -252,12 +252,9 @@ function offerLines(catalog: Map<string, CatalogProduct>, offer: MkRecord, numbe
   return lines.map((l, i) => {
     const n = i + 1;
     if (!str(l.mk_id) && !str(l.code)) {
-      // A section header: no product, no name, nothing to pay, only its text.
+      // A section header: no product, no name ("" from Metakocka's form, none from the API), nothing to pay, only its text.
       const heading = str(l.doc_desc)?.trim() || str(l.name_desc)?.trim();
-      if (!str(l.name)?.trim() && !num(l.amount) && !num(l.price) && heading) {
-        const taxCode = str(l.tax) ?? "";
-        return headerLine(heading, { taxCode, taxRatePercent: rates.get(taxCode) ?? 0 });
-      }
+      if (!str(l.name)?.trim() && !num(l.amount) && !num(l.price) && heading) return headerLine(heading);
       if (str(l.name)?.trim()) {
         throw new DraftError(
           `${number}, line ${n} (${str(l.name)}) is a free-text line, and Metakocka's API doesn't return its unit of measure. ` +

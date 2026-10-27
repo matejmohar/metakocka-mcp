@@ -38,11 +38,6 @@ export interface LineInput {
 export const DESCRIPTION_MAX = 700;
 /** Longest free-text line name: a product's name is "char, 200" (docs/product_concept.md). */
 export const FREE_TEXT_NAME_MAX = 200;
-/**
- * The unit a section header is sent with. put_document refuses a line without a product and without a unit
- * ("unit must be set to add new product"); with a unit and no code it saves the line as text, as for free-text lines.
- */
-export const HEADER_UNIT = "kos";
 
 export interface BuildContext {
   client: MetakockaClient;
@@ -380,22 +375,15 @@ function freeTextLine(catalog: Map<string, CatalogProduct>, line: LineInput, n: 
   return { ...priced, freeText: true };
 }
 
-/**
- * Fills in salesLines' headers; refused when there is no product or free-text line. A header carries the
- * catalogue's 0 % tax code, as headers made in Metakocka's form do ("000"), else the first line's code; its
- * amounts are 0 either way.
- */
-export function withHeaders(lines: (DraftLine | undefined)[], input: LineInput[], what: string, catalog: Map<string, CatalogProduct>): DraftLine[] {
-  const first = lines.find((l) => l !== undefined);
-  if (!first) throw new DraftError(`${what} needs at least one product or free-text line; section headers alone are not enough.`);
-  const zero = catalogZeroTax(catalog);
-  const tax = zero ? { taxCode: zero.code, taxRatePercent: 0 } : first;
-  return lines.map((l, i) => l ?? headerLine(input[i]!.title!.trim(), tax));
+/** Fills in salesLines' headers; refused when there is no product or free-text line. */
+export function withHeaders(lines: (DraftLine | undefined)[], input: LineInput[], what: string): DraftLine[] {
+  if (!lines.some((l) => l !== undefined)) throw new DraftError(`${what} needs at least one product or free-text line; section headers alone are not enough.`);
+  return lines.map((l, i) => l ?? headerLine(input[i]!.title!.trim()));
 }
 
-/** A section header: a line without a product and without a name, its heading in name_desc and doc_desc. */
-export function headerLine(title: string, tax: Pick<DraftLine, "taxCode" | "taxRatePercent">): DraftLine {
-  return { productId: "", name: title, header: title, quantity: 0, price: 0, discountPercent: 0, taxCode: tax.taxCode, taxRatePercent: tax.taxRatePercent, net: 0, tax: 0, gross: 0 };
+/** A section header (opisna vrstica): no product, no amounts, only its heading; Metakocka gives it the tax and zeros. */
+export function headerLine(title: string): DraftLine {
+  return { productId: "", name: title, header: title, quantity: 0, price: 0, discountPercent: 0, taxCode: "", taxRatePercent: 0, net: 0, tax: 0, gross: 0 };
 }
 
 /** Net, tax and gross of a line. */
@@ -442,14 +430,15 @@ export function totalsOf(lines: DraftLine[], currency = "EUR"): DraftTotals {
 
 /**
  * put_document finds products by code / count_code; mk_id alone leaves it "not found". A line with a unit and no
- * code is saved as text without a product: a free-text line with its name, or a section header with an empty
- * name and its heading in name_desc and doc_desc, as Metakocka's form stores one.
+ * code is saved as a free-text line with its name, without adding a product. A section header is
+ * { description_line: true, name }: Metakocka stores it as its form does (heading in name_desc and doc_desc,
+ * amounts 0). description_line isn't in Metakocka's public API docs; it was confirmed on a live offer on 2026-10-27.
  */
 export function productListPayload(lines: DraftLine[]): MkRecord[] {
   return lines.map((l) => {
     const desc = l.description ? { doc_desc: l.description } : {};
     if (l.header !== undefined) {
-      return { name: "", name_desc: l.header, doc_desc: l.header, unit: HEADER_UNIT, amount: "0", price: "0", discount: "0", tax: l.taxCode };
+      return { description_line: true, name: l.header };
     }
     if (l.freeText) {
       return { name: l.name, unit: l.unit, amount: String(l.quantity), price: String(l.price), discount: String(l.discountPercent), tax: l.taxCode, ...desc };

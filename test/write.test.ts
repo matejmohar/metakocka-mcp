@@ -111,7 +111,10 @@ function metakocka(o: FakeOptions = {}) {
 
 /** What get_document would return for a put_document body. */
 function storedFrom(put: Body) {
-  const lines = put.product_list as Body[];
+  // A description line is stored as Metakocka stores one made through the API: no name, its text, zeros.
+  const lines = (put.product_list as Body[]).map((l) =>
+    l.description_line ? { name_desc: l.name, amount: "0", price: "0", discount: "0", tax: "000", doc_desc: l.name } : l,
+  );
   const total = lines.reduce((s, l) => s + Number(l.amount) * Number(l.price) * (1 - Number(l.discount ?? 0) / 100) * (l.tax === "EX4" ? 1.22 : 1), 0);
   return {
     doc_type: "sales_offer",
@@ -1897,10 +1900,10 @@ describe("line descriptions, free-text lines and section headers on sales docume
   };
   const write = () => quiet(SALES);
   const withTerm = partner({ partner_delivery_address_list: [{ mk_id: "400079138037", street: "Glavna 1", post_number: "1000", city: "Ljubljana", country: "Slovenia", payment_due_days: "8" }] });
-  /** A section header as put_document takes it. */
-  const HEADER = (title: string, tax = "000") => ({ name: "", name_desc: title, doc_desc: title, unit: "kos", amount: "0", price: "0", discount: "0", tax });
-  /** A section header as get_document returns one made in Metakocka's form. */
-  const STORED_HEADER = (title: string) => ({ name: "", name_desc: title, amount: "0", price: "0", discount: "0", tax: "000", doc_desc: title });
+  /** A section header (opisna vrstica) as put_document takes it. */
+  const HEADER = (title: string) => ({ description_line: true, name: title });
+  /** A section header as get_document returns it: name "" when made in Metakocka's form, none when made through the API. */
+  const STORED_HEADER = (title: string, name: string | undefined = "") => ({ ...(name === undefined ? {} : { name }), name_desc: title, amount: "0", price: "0", discount: "0", tax: "000", doc_desc: title });
   const MIXED = {
     doc_type: "sales_offer",
     partner_id: "400068941553",
@@ -1943,24 +1946,18 @@ describe("line descriptions, free-text lines and section headers on sales docume
     ]);
   });
 
-  it("a section header: empty name, its heading in name_desc and doc_desc, a unit, 0 amount, price and discount", async () => {
+  it("a section header is sent as a description line with its heading, and Metakocka's stored form of it passes the check", async () => {
     const fake = metakocka();
     const { client } = await connect(fake, { write: write() });
     const { body } = await draft(client, { ...OFFER, lines: [{ title: "Spletne strani + e-pošta" }, { product_id: "P1", quantity: 1 }] });
     expect(body.lines).toEqual([{ title: "Spletne strani + e-pošta" }, expect.objectContaining({ product_id: "P1", quantity: 1 })]);
     expect(body.totals).toEqual({ net: 35, tax: 7.7, gross: 42.7, currency: "EUR" });
-    await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } });
+    const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
     expect(fake.puts()[0]!.body.product_list).toEqual([
       HEADER("Spletne strani + e-pošta"),
       { mk_id: "P1", code: "SVC-H", count_code: "1", amount: "1", price: "35", discount: "0", tax: "EX4" },
     ]);
-
-    // Without a single 0 % code in the catalogue a header takes the first line's code.
-    const noZero = metakocka({ products: PRODUCTS.filter((p) => p.code !== "SUPPORT") });
-    const { client: c2 } = await connect(noZero, { write: write() });
-    const { body: b2 } = await draft(c2, { ...OFFER, lines: [{ title: "Uvod" }, { product_id: "P1", quantity: 1 }] });
-    await c2.callTool({ name: "commit_document", arguments: { draft_id: b2.draft_id } });
-    expect((noZero.puts()[0]!.body.product_list as Body[])[0]).toEqual(HEADER("Uvod", "EX4"));
+    expect(r.warnings).toEqual([]);
   });
 
   it("a mixed document keeps the lines in order; headers add nothing to the totals; the summary shows it all in that order", async () => {
@@ -1989,11 +1986,11 @@ describe("line descriptions, free-text lines and section headers on sales docume
     );
     const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
     expect(r.warnings).toEqual([]);
-    expect((fake.puts()[0]!.body.product_list as Body[]).map((l) => [l.code ?? l.name, l.doc_desc, l.amount])).toEqual([
-      ["", "Svetovanje", "0"],
+    const sent = fake.puts()[0]!.body.product_list as Body[];
+    expect([sent[0], sent[3]]).toEqual([HEADER("Svetovanje"), HEADER("Dokumentacija")]);
+    expect([sent[1]!, sent[2]!, sent[4]!].map((l) => [l.code ?? l.name, l.doc_desc, l.amount])).toEqual([
       ["SVC-H", "Kronotop Hostel", "3"],
       ["Ureditev DNS zapisov", "Kronotop\nHostel", "2"],
-      ["", "Dokumentacija", "0"],
       ["SVC-D", undefined, "1"],
     ]);
   });
@@ -2074,7 +2071,7 @@ describe("line descriptions, free-text lines and section headers on sales docume
         STORED_HEADER("Spletne strani + e-pošta"),
         { mk_id: "P1", code: "SVC-H", name: "Svetovanje", name_desc: "Dolg opis artikla", amount: "12", price: "25", tax: "EX4", doc_desc: "Kronotop Hostel" },
         { mk_id: "P1", code: "SVC-H", name: "Svetovanje", amount: "12", price: "25", discount: "60", tax: "EX4", doc_desc: "Forthventure, samo e-pošta" },
-        STORED_HEADER("Dokumentacija"),
+        STORED_HEADER("Dokumentacija", undefined),
         { mk_id: "P2", code: "SVC-D", name: "Dokumentacija", amount: "1", price: "20", tax: "EX4" },
       ],
     };

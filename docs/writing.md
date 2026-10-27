@@ -160,7 +160,8 @@ discount so. Lines with a price given by hand get none, and the draft says when 
 Lines on offers and sales invoices: a product line can carry a description (its text on the document, up to 700
 characters). A line with `name` and `unit` instead of a product is a free-text line (prosti vnos); it needs its quantity,
 price and `vat_percent`, and Metakocka saves it without adding a product. A line with only a `title` is a section header
-(opisna vrstica). An invoice made from an offer keeps descriptions and headers; an offer with a free-text line is
+(opisna vrstica), sent as `{"description_line": true, "name": "<title>"}` — not in Metakocka's public API docs, but
+confirmed on a live offer on 2026-10-27. An invoice made from an offer keeps descriptions and headers; an offer with a free-text line is
 refused there, because Metakocka's API doesn't return that line's unit.
 
 Not supported yet: products with tiered or several prices when changing a price.

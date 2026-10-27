@@ -85,7 +85,6 @@ async function buildSalesDraft(
     salesLines(catalog, input.lines, { foreignTax, currency, partnerDiscounts: partner.discounts }),
     input.lines,
     offer ? "An offer" : "A sales order",
-    catalog,
   );
   warnings.push(...foreignVatWarnings(partner, lines), ...partnerDiscountNotes(partner, lines, input.lines, catalog));
   const totals = totalsOf(lines, currency);
