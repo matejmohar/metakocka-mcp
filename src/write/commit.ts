@@ -162,7 +162,13 @@ export function verifyStored(draft: Draft, doc: MkRecord): string[] {
     if (str(s.mk_id) && str(s.mk_id) !== line.productId) problems.push(`line ${n} has product ${str(s.code) ?? str(s.mk_id)}, not ${line.code ?? line.productId}`);
     if (!near(num(s.amount), line.quantity, 1e-6)) problems.push(`line ${n} quantity ${str(s.amount)}, not ${line.quantity}`);
     if (!unpriced && !near(num(s.price), line.price, 1e-4)) problems.push(`line ${n} price ${str(s.price)}, not ${line.price}`);
-    if (!unpriced && str(s.tax) && str(s.tax) !== line.taxCode) problems.push(`line ${n} tax ${str(s.tax)}, not ${line.taxCode}`);
+    if (!unpriced && line.header === undefined && str(s.tax) && str(s.tax) !== line.taxCode) problems.push(`line ${n} tax ${str(s.tax)}, not ${line.taxCode}`);
+    // Sales documents: the line's description, a section header's text, a free-text line's name.
+    const text = line.header ?? line.description;
+    if (text !== undefined && str(s.doc_desc)?.trim() !== text) problems.push(`line ${n} text "${str(s.doc_desc) ?? ""}", not "${text}"`);
+    // A header is stored without a name ("" or none) and with Metakocka's own zeros and tax.
+    if (line.header !== undefined && str(s.name)?.trim()) problems.push(`line ${n} is "${str(s.name)}", not a section header`);
+    if (line.freeText && str(s.name) !== line.name) problems.push(`line ${n} name "${str(s.name) ?? ""}", not "${line.name}"`);
   });
   const total = num(doc.sum_all);
   if (!unpriced && total !== undefined && !near(total, draft.totals.gross, 0.01)) problems.push(`total ${total}, not ${draft.totals.gross}`);
