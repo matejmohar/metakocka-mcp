@@ -235,7 +235,6 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
             }),
           )
           .min(1)
-          .max(50)
           .optional(),
         ...(offers || orders || invoices ? { title: z.string().max(100).optional().describe("Document title (naziv).") } : {}),
         note: z.string().max(1000).optional().describe("Note on the document."),
@@ -556,7 +555,6 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
                 vat_percent: z.number().min(0).max(100).optional().describe("VAT rate; default the price list's (0 for foreign partners); purchase: required."),
               }),
             )
-            .max(50)
             .optional()
             .describe("goods: which invoice lines and how many (default all); financial / standalone: the lines."),
           due_days: z.number().int().min(0).max(365).optional(),
@@ -717,11 +715,9 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           order_number: z.string().optional().describe("create: the sales order's number."),
           products: z
             .array(z.object({ product_id: z.string().optional(), code: z.string().optional(), quantity: z.number().positive(), reason: z.string().max(100).optional(), description: z.string().max(500).optional() }))
-            .max(50)
             .optional(),
           replacement_products: z
             .array(z.object({ product_id: z.string().optional(), code: z.string().optional(), quantity: z.number().positive(), price_with_tax: z.number().min(0) }))
-            .max(50)
             .optional(),
           reason: z.string().max(100).optional().describe("Complaint reason as in Metakocka's register."),
           description: z.string().max(1000).optional(),
