@@ -1386,6 +1386,14 @@ describe("credit notes, prepayment invoices, purchase and warehouse documents", 
     expect(whole.warnings).toEqual(["This credits invoice RD-7/2026 in full."]);
   });
 
+  it("credit notes take more than 50 lines", async () => {
+    const { client } = await connect(fake(), { write: quiet(SETTINGS_ALL) });
+    const lines = Array.from({ length: 60 }, (_, i) => ({ product_id: "P1", quantity: i + 1, price: 1 }));
+    const r = await client.callTool({ name: "draft_credit_note", arguments: { credit_type: "standalone", partner_id: "400068941553", lines } });
+    expect(r.isError).toBeFalsy();
+    expect(parse(r).lines.map((l: { quantity: number }) => l.quantity)).toEqual(lines.map((l) => l.quantity));
+  });
+
   it("drafts a prepayment invoice like an invoice", async () => {
     const f = fake();
     const { client } = await connect(f, { write: quiet(SETTINGS_ALL) });
@@ -1669,6 +1677,22 @@ describe("shipping, complaints and messages", () => {
     expect(upd.summary).toBe("Spremeni REKLAMACIJO RK-4\n  status: draft → completed\n  opomba: Vrnjeno");
     await client.callTool({ name: "commit_document", arguments: { draft_id: upd.draft_id } });
     expect(f.calls.find((c) => c.endpoint === "../update_complaint")!.body).toMatchObject({ claim_id: "C4", claim_type: "return", claim_status: "completed", claim_note: "Vrnjeno" });
+  });
+
+  it("complaints take more than 50 products and replacement products", async () => {
+    const big = order("1", { product_list: [{ mk_id: "P8", code: "BOX", name: "Škatla", amount: "100" }] });
+    const f = metakocka({
+      search: (body) => ({ opr_code: "0", result: body.doc_type === "sales_order" && body.query === "PP-1" ? [big] : [] }),
+      handlers: { get_document: () => ({ opr_code: "0", ...big }) },
+    });
+    const { client } = await connect(f, { write: quiet(OUT) });
+    const products = Array.from({ length: 60 }, () => ({ code: "BOX", quantity: 1 }));
+    const replacement_products = Array.from({ length: 60 }, () => ({ code: "BOX", quantity: 1, price_with_tax: 1 }));
+    const r = await client.callTool({ name: "draft_complaint", arguments: { action: "create", claim_type: "replacement", order_number: "PP-1", products, replacement_products } });
+    expect(r.isError).toBeFalsy();
+    const summary: string = parse(r).summary;
+    expect(summary.match(/ × Škatla/g)).toHaveLength(60);
+    expect(summary.match(/ × BOX à/g)).toHaveLength(60);
   });
 
   it("messages: shows exactly what is sent, reports a refused message, and never resends after a lost answer", async () => {
