@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "metakocka-mcp",
   "display_name": "Metakocka",
-  "version": "0.12.1",
+  "version": "0.12.2",
   "description": "Ask Claude about your Metakocka ERP: documents, invoices, stock, products and partners. Read-only by default; creating offers, invoices, received invoices, partners and products can be turned on. Works in Slovenian and English (slovenščina in angleščina).",
   "long_description": "Connects Claude to your Metakocka ERP so you can ask questions about your business in plain language: who owes you money and how overdue they are, top products last month, stock in a warehouse, or the full detail of a sales order. By default it is read-only. Creating offers (ponudbe / predračuni), invoices (računi) and received invoices (prejeti računi, copied from the supplier's PDF) can be turned on in the settings, and so can adding new partners and products: documents are linked to partners and products that exist in Metakocka (or that you have just added), and you confirm each one before it is saved. Invoices are saved not issued, for you to check and issue in Metakocka. It never changes or deletes anything. Requests go directly from your computer to Metakocka's API. This is an independent community project, not made or endorsed by Metakocka d.o.o.",
   "author": {
@@ -203,7 +203,7 @@
     },
     {
       "name": "draft_update",
-      "description": "Prepare a change to an existing order, invoice or warehouse document (off unless turned on)."
+      "description": "Prepare a change to an existing offer, order, invoice or warehouse document (off unless turned on)."
     },
     {
       "name": "draft_partner_update",
@@ -306,8 +306,8 @@
     },
     "allow_offers": {
       "type": "boolean",
-      "title": "Allow creating offers",
-      "description": "Let Claude create offers (ponudbe / predračuni) in Metakocka, linked only to partners and products that already exist. Off by default.",
+      "title": "Allow creating and changing offers",
+      "description": "Let Claude create offers (ponudbe / predračuni) in Metakocka, linked only to partners and products that already exist, and change existing offers (lines, title, note, validity). Off by default.",
       "required": false,
       "default": false
     },

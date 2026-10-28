@@ -1,2 +1,2 @@
 // Keep in sync with package.json (scripts/sync-version.mjs does it on `npm version`).
-export const VERSION = "0.12.1";
+export const VERSION = "0.12.2";

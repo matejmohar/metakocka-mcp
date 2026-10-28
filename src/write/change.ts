@@ -21,6 +21,8 @@ export interface ChangeCheck {
 export interface ChangeSpec {
   /** E.g. "update_document", or "../send_message" for calls outside /v1. */
   endpoint: string;
+  /** Run right before the call: a reason to refuse it (e.g. the document changed since the draft), or undefined. */
+  precheck?: (client: MetakockaClient) => Promise<string | undefined>;
   /** Turns Metakocka's answer into warnings and details, or throws when it reports a failure inside a 0 opr_code. */
   interpret?: (response: MkRecord) => { warnings?: string[]; details?: Record<string, unknown>; mkId?: string; number?: string };
   /**
@@ -39,6 +41,13 @@ export interface ChangeSpec {
 export async function commitChange(ctx: CommitContext, draft: Draft): Promise<CommitOutcome> {
   const spec = draft.change!;
   const base = { draft_id: draft.id, doc_type: draft.docType, installation: ctx.installation };
+  const refused = await spec.precheck?.(ctx.client);
+  if (refused) {
+    // The draft no longer fits what it changes; it can't be saved, only drafted again.
+    draft.status = "discarded";
+    await ctx.journal({ ...base, event: "failed", error: refused });
+    return { status: "rejected", message: refused };
+  }
   draft.status = "committing";
   await ctx.journal({ ...base, event: "attempt", endpoint: spec.endpoint, payload: spec.logPayload ?? draft.payload });
   let response: MkRecord;

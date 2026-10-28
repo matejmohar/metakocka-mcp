@@ -7,7 +7,7 @@ the Claude Desktop extension:
 
 | Value | Lets Claude |
 |---|---|
-| `offers` | create offers |
+| `offers` | create offers, and change them (lines, title, note, validity) |
 | `orders` | create sales orders and invoices from them; change an order (status, tracking code, shipping date, have Metakocka invoice it) |
 | `invoices` | create invoices and prepayment invoices; change an invoice's status |
 | `credit_notes` | create credit notes to invoices, and enter suppliers' credit notes |
@@ -33,6 +33,7 @@ and change documents that already exist:
 
 - payments (`payments`): *"ACME je plačal RD-2/2026."*, *"Avantu smo plačali račun 126-039951."*, a prepayment
   (avans) on an offer or order, or a refund
+- an offer (`offers`): its lines, title, note and validity: *"V ponudbi 6/2026 spremeni ceno druge postavke na 90 € in dodaj opombo."*
 - an order, invoice or warehouse document (`orders`, `invoices`, `warehouse`): *"Naročilo PP-18495 je odpremljeno."*
 - a partner or product (`partners`, `products`): *"Dvigni ceno artikla ART-1 na 12 €."*, *"Varnostna zaloga za ART-1 naj bo 20."*
 
@@ -163,6 +164,19 @@ price and `vat_percent`, and Metakocka saves it without adding a product. A line
 (opisna vrstica), sent as `{"description_line": true, "name": "<title>"}` — not in Metakocka's public API docs, but
 confirmed on a live offer on 2026-10-27. An invoice made from an offer keeps descriptions and headers; an offer with a free-text line is
 refused there, because Metakocka's API doesn't return that line's unit.
+
+Changing an offer: Metakocka's `update_document` can't change an offer, so `draft_update` saves the whole offer again
+with `put_document` and its id (docs/documents_concept.md, "1.4 update_document specific"): every line is deleted and
+added from the request, and header fields left out are cleared. The draft therefore sends every field the offer has,
+and `lines` is the offer's full new list. A line with `keep_line` (the offer's line number, section headers counted)
+keeps its product, price, discount, VAT and text unless the line gives new ones; other lines are new, as in
+`draft_document`; lines left out are removed. A kept free-text line needs its `unit` again, because Metakocka's API
+doesn't return it. The summary lists the changed fields, the lines removed, changed (old → new) and added, and the old
+and new totals. The offer is read again right before saving and the change is refused if it changed since the draft;
+an offer with header fields the API can't save back is refused too. The draft warns about the offer's status, payments
+and invoices or orders made from it, and that the API can't tell whether the offer was already sent. Offers can't be
+deleted through the API. An invoice's lines can't be changed: issue a credit note, or delete an unissued invoice and
+create it again.
 
 Not supported yet: products with tiered or several prices when changing a price.
 Only the fields Metakocka's API allows can be changed, and nothing can be deleted.

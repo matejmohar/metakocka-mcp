@@ -179,7 +179,7 @@ All good — the server is ready to use.
 | `draft_partner` / `draft_product` | A new partner or product that isn't in Metakocka yet. |
 | `draft_partner_update` / `draft_product_update` | A change to a partner's data, or to a product (e.g. its price, safety stock, or whether it is a service or goods). |
 | `draft_payment` | A payment on an existing invoice, offer or order (mark it paid, a supplier paid, a prepayment or a refund). |
-| `draft_update` | A change Metakocka's API allows on an existing order (status, tracking code, shipping date, invoicing it), invoice (status) or warehouse document. |
+| `draft_update` | A change Metakocka's API allows on an existing offer (lines, title, note, validity), order (status, tracking code, shipping date, invoicing it), invoice (status) or warehouse document. |
 | `draft_shipping` | Delivery labels, marking orders shipped, or a group expedition. |
 | `draft_complaint` | A complaint, return or replacement for an order, or a complaint's new status. |
 | `draft_message` | An SMS, Viber, WhatsApp or e-mail to a customer. |
@@ -209,7 +209,7 @@ the Claude Desktop extension:
 
 | Value | Lets Claude |
 |---|---|
-| `offers` | create offers |
+| `offers` | create offers, and change them (lines, title, note, validity) |
 | `orders` | create sales orders and invoices from them; change an order (status, tracking code, shipping date, have Metakocka invoice it) |
 | `invoices` | create invoices and prepayment invoices; change an invoice's status |
 | `credit_notes` | create credit notes to invoices, and enter suppliers' credit notes |

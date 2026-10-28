@@ -8,7 +8,8 @@ import { ConfigError, envValue } from "../config.js";
 
 /** What the write tools can create or change, by the name that turns it on. */
 export const WRITABLE_TYPES = {
-  offers: ["sales_offer"],
+  /** Offers, and changes to an offer (lines, title, note, validity). */
+  offers: ["sales_offer", "offer_update"],
   /** Invoices, prepayment invoices (avansni računi) and an invoice's status. */
   invoices: ["sales_bill_domestic", "sales_bill_foreign", "sales_bill_prepaid", "invoice_update"],
   /** Credit notes we issue and the ones suppliers send (prejeti dobropis). */
@@ -48,6 +49,7 @@ export const isRecordType = (t: WritableDocType): t is RecordType => t === "part
 /** Changes to something that already exists, and messages: saved with their own calls, not put_document. */
 export const CHANGE_TYPES = [
   "payment",
+  "offer_update",
   "order_update",
   "invoice_update",
   "warehouse_update",
