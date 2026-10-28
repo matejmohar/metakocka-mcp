@@ -317,6 +317,15 @@ describe("draft_document", () => {
     // 3 × 33.33 × 0.9 = 89.991 → 89.99; VAT 22 % = 19.7978 → 19.80
     expect(body.totals).toEqual({ net: 89.99, tax: 19.8, gross: 109.79, currency: "EUR" });
   });
+
+  it("takes more than 50 lines: Metakocka documents no limit on a document's lines", async () => {
+    const { client } = await connect(metakocka());
+    const lines = Array.from({ length: 60 }, (_, i) => ({ product_id: i % 2 ? "P2" : "P1", quantity: i + 1 }));
+    const { result, body } = await draft(client, { ...OFFER, lines });
+    expect(result.isError).toBeFalsy();
+    expect(body.lines).toHaveLength(60);
+    expect(body.lines.map((l: { quantity: number }) => l.quantity)).toEqual(lines.map((l) => l.quantity));
+  });
 });
 
 describe("price list rules", () => {

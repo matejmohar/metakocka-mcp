@@ -235,7 +235,6 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
             }),
           )
           .min(1)
-          .max(50)
           .optional(),
         ...(offers || orders || invoices ? { title: z.string().max(100).optional().describe("Document title (naziv).") } : {}),
         note: z.string().max(1000).optional().describe("Note on the document."),
