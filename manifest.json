@@ -203,7 +203,7 @@
     },
     {
       "name": "draft_update",
-      "description": "Prepare a change to an existing order, invoice or warehouse document (off unless turned on)."
+      "description": "Prepare a change to an existing offer, order, invoice or warehouse document (off unless turned on)."
     },
     {
       "name": "draft_partner_update",
@@ -306,8 +306,8 @@
     },
     "allow_offers": {
       "type": "boolean",
-      "title": "Allow creating offers",
-      "description": "Let Claude create offers (ponudbe / predračuni) in Metakocka, linked only to partners and products that already exist. Off by default.",
+      "title": "Allow creating and changing offers",
+      "description": "Let Claude create offers (ponudbe / predračuni) in Metakocka, linked only to partners and products that already exist, and change existing offers (lines, title, note, validity). Off by default.",
       "required": false,
       "default": false
     },

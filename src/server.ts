@@ -122,6 +122,7 @@ export function writeInstructions(confirm: "client" | "elicitation" | "never", d
   const changes = [
     has("payment") && "draft_payment records a payment on an existing invoice, offer or order (marks it paid)",
     (has("order_update") || has("invoice_update") || has("warehouse_update")) && "draft_update changes an existing order, invoice or warehouse document (status, tracking code …)",
+    has("offer_update") && "draft_update changes an existing offer: its lines (the full new list, keep_line for lines that stay), title, note and validity",
     has("partner_update") && "draft_partner_update changes a partner",
     has("product_update") && "draft_product_update changes a product (e.g. price, safety stock)",
     has("shipping") && "draft_shipping prints delivery labels, marks orders shipped or groups them",

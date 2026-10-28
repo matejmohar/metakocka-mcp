@@ -197,10 +197,10 @@ describe("write tools are opt-in", () => {
   it("settings: off by default, offers and invoices enable, unknown values are refused", () => {
     expect(writeSettingsFromEnv({})).toBeUndefined();
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "off" })).toBeUndefined();
-    expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers" })).toMatchObject({ docTypes: ["sales_offer"], confirm: "client", timeoutMs: 120_000 });
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers" })).toMatchObject({ docTypes: ["sales_offer", "offer_update"], confirm: "client", timeoutMs: 120_000 });
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers", METAKOCKA_WRITE_CONFIRM: "elicitation" })?.confirm).toBe("elicitation");
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers", METAKOCKA_WRITE_CONFIRM: "never" })?.confirm).toBe("never");
-    expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers,invoices" })?.docTypes).toEqual(["sales_offer", "sales_bill_domestic", "sales_bill_foreign", "sales_bill_prepaid", "invoice_update"]);
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "offers,invoices" })?.docTypes).toEqual(["sales_offer", "offer_update", "sales_bill_domestic", "sales_bill_foreign", "sales_bill_prepaid", "invoice_update"]);
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "invoices" })?.docTypes).toEqual(["sales_bill_domestic", "sales_bill_foreign", "sales_bill_prepaid", "invoice_update"]);
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_PURCHASE_INVOICES: "true" })?.docTypes).toEqual(["purchase_bill_domestic", "purchase_bill_foreign"]);
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE: "partners,products" })?.docTypes).toEqual(["partner", "partner_update", "product", "product_update"]);
@@ -211,7 +211,7 @@ describe("write tools are opt-in", () => {
     expect(() => writeSettingsFromEnv({ METAKOCKA_WRITE: "offers,order" })).toThrow(ConfigError);
     // The Claude Desktop extension's checkboxes.
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "false", METAKOCKA_WRITE_CONFIRM: "true" })).toBeUndefined();
-    expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "true", METAKOCKA_WRITE_CONFIRM: "true" })).toMatchObject({ docTypes: ["sales_offer"], confirm: "client" });
+    expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "true", METAKOCKA_WRITE_CONFIRM: "true" })).toMatchObject({ docTypes: ["sales_offer", "offer_update"], confirm: "client" });
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "true", METAKOCKA_WRITE_CONFIRM: "false" })?.confirm).toBe("never");
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "${user_config.allow_offers}" })).toBeUndefined();
     expect(writeSettingsFromEnv({ METAKOCKA_WRITE_OFFERS: "false", METAKOCKA_WRITE_INVOICES: "true" })?.docTypes).toEqual(["sales_bill_domestic", "sales_bill_foreign", "sales_bill_prepaid", "invoice_update"]);
@@ -2179,5 +2179,214 @@ describe("line descriptions, free-text lines and section headers on sales docume
     expect(purchase.line.name).toBeUndefined();
     expect(purchase.line.title).toBeUndefined();
     expect(purchase.description).not.toMatch(/free-text|section header/);
+  });
+});
+
+describe("changing an offer: lines, title, note and validity", () => {
+  const EDITS: WriteSettings = { docTypes: ["sales_offer", "offer_update", "invoice_update"], confirm: "never", timeoutMs: 120_000 };
+  /** Offer 8/2026 as get_document returns it: a header, two products and a free-text line. */
+  const OFFER_DOC = (over: Record<string, unknown> = {}) => ({
+    mk_id: "653600000170",
+    doc_type: "sales_offer",
+    count_code: "8/2026",
+    doc_date: "2026-10-01+02:00",
+    partner: { mk_id: "400068941553", customer: "ACME d.o.o.", tax_id_number: "SI12345678", mk_address_id: "400079138037" },
+    currency_code: "EUR",
+    valid_days: "15",
+    valid_to: "2026-10-16+02:00",
+    title: "Prenova",
+    notes: "Stara opomba",
+    doc_created_email: "matej@mohar.dev",
+    product_list: [
+      { name_desc: "Svetovanje", amount: "0", price: "0", discount: "0", tax: "000", doc_desc: "Svetovanje" },
+      { mk_id: "P1", code: "SVC-H", name: "Svetovanje", amount: "2", price: "35", discount: "0", tax: "EX4", doc_desc: "opis A" },
+      { mk_id: "P2", code: "SVC-D", name: "Dokumentacija", amount: "1", price: "20", discount: "0", tax: "EX4" },
+      { name: "Ureditev DNS", amount: "1", price: "40", discount: "0", tax: "EX4" },
+    ],
+    sum_basic: "130",
+    sum_tax_ex4: "28.6",
+    sum_all: "158.6",
+    fulfillment_user: ["false"],
+    ...over,
+  });
+
+  /** A Metakocka holding one offer that put_document with its mk_id rewrites, as the live probe showed. */
+  function offerKocka(doc: Record<string, unknown> = OFFER_DOC(), linked: Record<string, unknown>[] = []) {
+    const docs: Record<string, Record<string, unknown>> = { [String(doc.mk_id)]: doc };
+    const fake = metakocka({
+      handlers: {
+        search: (body) =>
+          body.query
+            ? { opr_code: "0", result: Object.values(docs).filter((d) => d.count_code === body.query) }
+            : { opr_code: "0", result_all_records: String(body.doc_type === "sales_bill_domestic" ? linked.length : 0), result: body.doc_type === "sales_bill_domestic" ? linked : [] },
+        get_document: (body) => ({ opr_code: "0", ...docs[String(body.doc_id)] }),
+        put_document: (body) => {
+          const id = String(body.mk_id);
+          const { company_id: _c, secret_key: _s, product_list, document_change_log_notes: _n, partner: p, ...header } = body;
+          const lines = (product_list as Body[]).map((l) =>
+            l.description_line
+              ? { name_desc: l.name, amount: "0", price: "0", discount: "0", tax: "000", doc_desc: l.name }
+              : l.mk_id
+                ? { ...l, name: PRODUCTS.find((x) => x.mk_id === l.mk_id)?.name }
+                : (({ unit: _u, ...rest }) => rest)(l),
+          );
+          const total = lines.reduce((s, l) => s + Number(l.amount) * Number(l.price) * (1 - Number(l.discount ?? 0) / 100) * (l.tax === "EX4" ? 1.22 : 1), 0);
+          docs[id] = { ...header, mk_id: id, count_code: docs[id]!.count_code, partner: { ...(docs[id]!.partner as Body), ...(p as Body) }, product_list: lines, sum_all: String(Math.round(total * 100) / 100) };
+          return { opr_code: "0", mk_id: id, count_code: docs[id]!.count_code };
+        },
+      },
+    });
+    return { ...fake, docs };
+  }
+  const edit = async (client: Client, args: Record<string, unknown>) => {
+    const r = await client.callTool({ name: "draft_update", arguments: { doc_type: "sales_offer", number: "8/2026", ...args } });
+    return { result: r, body: parse(r) };
+  };
+  const commit = (client: Client, draftId: string) => client.callTool({ name: "commit_document", arguments: { draft_id: draftId } }).then(parse);
+
+  /** The live test's change: a description, a price and the note; a new header; one product line removed. */
+  const CHANGE = {
+    note: "Nova opomba",
+    lines: [
+      { keep_line: 1 },
+      { keep_line: 2, description: "opis B", price: 40 },
+      { title: "Dodatno" },
+      { keep_line: 4, unit: "ura" },
+    ],
+  };
+
+  it("shows a before/after diff, sends the whole offer with its mk_id, and reads it back", async () => {
+    const fake = offerKocka();
+    const { client } = await connect(fake, { write: quiet(EDITS) });
+    const { body } = await edit(client, CHANGE);
+    expect(body.summary).toBe(
+      [
+        "Spremeni PONUDBO 8/2026 (ACME d.o.o.)",
+        "  Opomba: Stara opomba → Nova opomba",
+        "",
+        "Postavke:",
+        "  − odstranjena (prej vrstica 3): 1 × Dokumentacija à 20,00 € = 20,00 €",
+        '  ~ spremenjena (vrstica 2, prej vrstica 2, Svetovanje): opis "opis A" → "opis B"; cena 35,00 € → 40,00 €',
+        "  + dodana (vrstica 3): ▸ Dodatno",
+        "  Nespremenjenih postavk: 2",
+        "",
+        "Osnova: 130,00 € → 120,00 €",
+        "DDV: 28,60 € → 26,40 €",
+        "Skupaj z DDV: 158,60 € → 146,40 €",
+      ].join("\n"),
+    );
+    expect(body.warnings).toEqual([expect.stringMatching(/can't tell whether this offer was already sent/)]);
+
+    const r = await commit(client, body.draft_id);
+    expect(r).toMatchObject({ status: "created", mk_id: "653600000170", number: "8/2026", warnings: [] });
+    const { company_id: _c, secret_key: _s, ...sent } = fake.puts()[0]!.body;
+    expect(sent).toEqual({
+      doc_type: "sales_offer",
+      mk_id: "653600000170",
+      doc_date: "2026-10-01+02:00",
+      currency_code: "EUR",
+      valid_days: "15",
+      title: "Prenova",
+      notes: "Nova opomba",
+      doc_created_email: "matej@mohar.dev",
+      partner: { mk_id: "400068941553", mk_address_id: "400079138037" },
+      product_list: [
+        { description_line: true, name: "Svetovanje" },
+        { mk_id: "P1", code: "SVC-H", count_code: "1", amount: "2", price: "40", discount: "0", tax: "EX4", doc_desc: "opis B" },
+        { description_line: true, name: "Dodatno" },
+        { name: "Ureditev DNS", unit: "ura", amount: "1", price: "40", discount: "0", tax: "EX4" },
+      ],
+      document_change_log_notes: `metakocka-mcp ${body.draft_id}`,
+    });
+  });
+
+  it("without lines, keeps every line as it is and changes only the header fields", async () => {
+    const doc = OFFER_DOC({ product_list: OFFER_DOC().product_list.slice(0, 3) });
+    const fake = offerKocka(doc);
+    const { client } = await connect(fake, { write: quiet(EDITS) });
+    const { body } = await edit(client, { title: "Prenova 2", valid_days: 30, note: "" });
+    expect(body.summary).toMatch(/^Spremeni PONUDBO 8\/2026 \(ACME d\.o\.o\.\)\n {2}Naziv: Prenova → Prenova 2\n {2}Opomba: Stara opomba → \(prazno\)\n {2}Velja dni: 15 → 30\n\nOsnova: 90,00 € → 90,00 €/);
+    expect(await commit(client, body.draft_id)).toMatchObject({ status: "created", warnings: [] });
+    const sent = fake.puts()[0]!.body;
+    expect(sent).toMatchObject({ title: "Prenova 2", valid_days: "30" });
+    expect(sent.notes).toBeUndefined();
+    expect(sent.product_list).toEqual([
+      { description_line: true, name: "Svetovanje" },
+      { mk_id: "P1", code: "SVC-H", count_code: "1", amount: "2", price: "35", discount: "0", tax: "EX4", doc_desc: "opis A" },
+      { mk_id: "P2", code: "SVC-D", count_code: "2", amount: "1", price: "20", discount: "0", tax: "EX4" },
+    ]);
+  });
+
+  it("refuses to save when the offer changed in Metakocka since the draft, and the draft can't be used again", async () => {
+    const fake = offerKocka();
+    const { client } = await connect(fake, { write: quiet(EDITS) });
+    const { body } = await edit(client, CHANGE);
+    fake.docs["653600000170"] = OFFER_DOC({ notes: "Someone else's note" });
+    const r = await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } });
+    expect(JSON.stringify(parse(r))).toMatch(/changed in Metakocka since this draft was made; nothing was saved/);
+    expect(fake.puts()).toHaveLength(0);
+    const again = await commit(client, body.draft_id);
+    expect(JSON.stringify(again)).not.toMatch(/"status":"created"/);
+    expect(fake.puts()).toHaveLength(0);
+  });
+
+  it("a free-text line kept needs its unit again, since get_document doesn't return it", async () => {
+    const fake = offerKocka();
+    const { client } = await connect(fake, { write: quiet(EDITS) });
+    const { result, body } = await edit(client, { lines: [{ keep_line: 2 }, { keep_line: 4 }] });
+    expect(result.isError).toBe(true);
+    expect(body).toMatch(/line 4 of the offer is a free-text line \("Ureditev DNS"\); give its unit/);
+    // Changing only the note keeps every line, so it needs the unit too.
+    expect((await edit(client, { note: "x" })).body).toMatch(/give its unit/);
+  });
+
+  it("refuses wrong keep_line use: out of range, twice, with another product, or a header's fields on a product", async () => {
+    const fake = offerKocka();
+    const { client } = await connect(fake, { write: quiet(EDITS) });
+    expect((await edit(client, { lines: [{ keep_line: 9 }] })).body).toMatch(/the offer has no line 9; it has 4/);
+    expect((await edit(client, { lines: [{ keep_line: 2 }, { keep_line: 2 }] })).body).toMatch(/line 2 of the offer is kept twice/);
+    expect((await edit(client, { lines: [{ keep_line: 2, product_id: "P2" }] })).body).toMatch(/keep_line keeps the offer's product/);
+    expect((await edit(client, { lines: [{ keep_line: 2, title: "X" }] })).body).toMatch(/isn't a section header/);
+    expect((await edit(client, { lines: [{ keep_line: 1, price: 3 }, { keep_line: 2 }] })).body).toMatch(/is a section header; it takes only title/);
+    expect((await edit(client, { lines: [{ keep_line: 1 }] })).body).toMatch(/needs at least one product or free-text line/);
+    expect(fake.puts()).toHaveLength(0);
+  });
+
+  it("refuses an offer with fields its API can't save back, a change that changes nothing, and lines on an invoice", async () => {
+    const odd = offerKocka(OFFER_DOC({ product_list: OFFER_DOC().product_list.slice(0, 3), profit_center: "PC1" }));
+    const { client } = await connect(odd, { write: quiet(EDITS) });
+    expect((await edit(client, { note: "x" })).body).toMatch(/has profit_center, which Metakocka's API can't save back/);
+
+    const fake = offerKocka(OFFER_DOC({ product_list: OFFER_DOC().product_list.slice(0, 3) }));
+    const { client: c2 } = await connect(fake, { write: quiet(EDITS) });
+    expect((await edit(c2, { note: "Stara opomba", lines: [{ keep_line: 1 }, { keep_line: 2 }, { keep_line: 3 }] })).body).toMatch(/already has all of that; nothing to change/);
+    expect((await edit(c2, { status: "Poslana", note: "x" })).body).toMatch(/status: can't be changed on an offer here/);
+    const bill = await c2.callTool({ name: "draft_update", arguments: { doc_type: "sales_bill_domestic", number: "1", lines: [{ keep_line: 1 }] } });
+    expect(parse(bill)).toMatch(/lines: only for offers/);
+  });
+
+  it("warns about the offer's status, payments and an invoice made from it; reordering shows as a move", async () => {
+    const invoiceFromOffer = { mk_id: "INV1", count_code: "RD-5/2026", doc_date: "2026-10-02+02:00", offer_list: [{ count_code: "8/2026" }] };
+    const fake = offerKocka(OFFER_DOC({ product_list: OFFER_DOC().product_list.slice(0, 3), status_code: "Poslana", sum_paid: "10" }), [invoiceFromOffer]);
+    const { client } = await connect(fake, { write: quiet(EDITS) });
+    const { body } = await edit(client, { lines: [{ keep_line: 1 }, { keep_line: 3 }, { keep_line: 2 }] });
+    expect(body.summary).toMatch(/\n {2}Vrstni red postavk se spremeni\.\n {2}Nespremenjenih postavk: 3\n/);
+    expect(body.warnings).toEqual(
+      expect.arrayContaining([
+        'Offer 8/2026 has the status "Poslana".',
+        "Offer 8/2026 already has payments; they stay on it.",
+        "Documents were made from offer 8/2026: RD-5/2026 (sales_bill_domestic). Changing the offer doesn't change them.",
+      ]),
+    );
+    expect((await commit(client, body.draft_id)).status).toBe("created");
+    expect(fake.puts()[0]!.body.status_code).toBe("Poslana");
+  });
+
+  it("is only there with the offers permission; the instructions name it", async () => {
+    const { client } = await connect(offerKocka(), { write: quiet({ ...EDITS, docTypes: ["invoice_update"] }) });
+    const tool = (await client.listTools()).tools.find((t) => t.name === "draft_update")!;
+    expect(JSON.stringify(tool.inputSchema)).not.toMatch(/sales_offer|keep_line/);
+    const { client: c2 } = await connect(offerKocka(), { write: quiet(EDITS) });
+    expect(c2.getInstructions()).toMatch(/draft_update changes an existing offer/);
   });
 });

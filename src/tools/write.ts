@@ -20,6 +20,7 @@ import { createJournal, type Journal } from "../write/journal.js";
 import { DraftError, DESCRIPTION_MAX, FREE_TEXT_NAME_MAX, sameSummary } from "../write/document.js";
 import { buildInvoiceDraft, type InvoiceInfo, type InvoiceInput } from "../write/invoice.js";
 import { buildOfferDraft, buildOrderDraft, type OfferInput, type OrderInput } from "../write/offer.js";
+import { buildOfferEditDraft, type OfferEditInput } from "../write/offeredit.js";
 import { buildPaymentDraft, PAYABLE_TYPES, type PaymentInput } from "../write/payment.js";
 import { buildComplaintDraft, CLAIM_TYPES, type ComplaintInput } from "../write/complaint.js";
 import { buildCreditNoteDraft, type CreditNoteInput } from "../write/creditnote.js";
@@ -364,7 +365,11 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
       expires_at: new Date(draft.expiresAt).toISOString(),
       summary: draft.summary,
       partner: draft.partner,
-      lines: draft.lines.map((l) => ({ product_id: l.productId, code: l.code, name: l.name, quantity: l.quantity, unit: l.unit, price: l.price, vat_percent: l.taxRatePercent, total: l.gross })),
+      lines: draft.lines.map((l) =>
+        l.header !== undefined
+          ? { title: l.header }
+          : { product_id: l.productId, code: l.code, name: l.name, description: l.description, quantity: l.quantity, unit: l.unit, price: l.price, vat_percent: l.taxRatePercent, total: l.gross },
+      ),
       totals: draft.totals,
       warnings,
       next: NEXT_STEP[settings.confirm],
@@ -630,7 +635,9 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
     );
   }
 
+  const offerEdits = has("offer_update");
   const updatable = [
+    ...(offerEdits ? (["sales_offer"] as const) : []),
     ...(has("order_update") ? ORDER_UPDATE_TYPES : []),
     ...(has("invoice_update") ? INVOICE_UPDATE_TYPES : []),
     ...(has("warehouse_update") ? WAREHOUSE_UPDATE_TYPES : []),
@@ -643,10 +650,15 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
         description:
           "Prepare a change to an existing document WITHOUT saving it, limited to what Metakocka's API can change: " +
           [
+            offerEdits &&
+              "offers: lines, title, note, valid_days (Metakocka saves the whole offer again: give lines as the offer's FULL new list, " +
+                "each either keep_line (a line of the offer, numbered from 1 with section headers counted, as get_document lists them; it keeps its " +
+                "product, price, discount, VAT and text unless you give new ones) or a new line as in draft_document; lines left out are removed. " +
+                "Free-text lines kept need their unit again, since Metakocka doesn't return it)",
             has("order_update") &&
               "sales orders: status, tracking_code (only once the order has an invoice), delivery_type, shipped_date, note, or create_invoice " +
                 "(Metakocka makes the invoice by its own order settings, possibly with a packing list; to control the invoice use draft_document with from_order)",
-            has("invoice_update") && "invoices: status",
+            has("invoice_update") && "invoices: status (an invoice's lines can't be changed: issue a credit note, or delete an unissued one and create it again)",
             has("warehouse_update") && "warehouse documents: title, status, note, buyer_order, delivery_type; transfers: confirm_transfer",
           ]
             .filter(Boolean)
@@ -657,6 +669,30 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           number: z.string().min(1).optional().describe("Document number as shown in Metakocka."),
           id: z.string().min(1).optional().describe("Or its Metakocka id."),
           status: z.string().max(100).optional().describe('New status as in Metakocka; on an invoice "" clears it.'),
+          ...(offerEdits
+            ? {
+                lines: z
+                  .array(
+                    z.object({
+                      keep_line: z.number().int().min(1).optional().describe("Keep this line of the offer (1 = first, section headers counted)."),
+                      product_id: z.string().optional().describe("A new product line: the product's id from search_products."),
+                      code: z.string().optional().describe("Or its exact code (šifra)."),
+                      quantity: z.number().positive().max(1_000_000).optional(),
+                      price: z.number().min(0).max(10_000_000).optional().describe("Net unit price; kept lines keep theirs, new product lines default to the price list."),
+                      discount_percent: z.number().min(0).max(100).optional(),
+                      vat_percent: z.number().min(0).max(100).optional(),
+                      description: z.string().max(DESCRIPTION_MAX).optional().describe('The line\'s text on the offer; "" clears a kept line\'s.'),
+                      name: z.string().max(FREE_TEXT_NAME_MAX).optional().describe("A free-text line's name (prosti vnos); give unit, quantity, price and vat_percent."),
+                      unit: z.string().max(20).optional().describe("Free-text lines, new or kept: unit of measure, e.g. kos, ura."),
+                      title: z.string().min(1).max(DESCRIPTION_MAX).optional().describe("A section header's heading (opisna vrstica)."),
+                    }),
+                  )
+                  .min(1)
+                  .optional()
+                  .describe("Offers: the full new list of lines; leave out to keep the lines."),
+                valid_days: z.number().int().min(1).max(365).optional().describe("Offers: days the offer is valid."),
+              }
+            : {}),
           ...(has("order_update")
             ? {
                 tracking_code: z.string().max(100).optional(),
@@ -664,15 +700,31 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
                 create_invoice: z.boolean().optional().describe("Sales orders: have Metakocka make the invoice."),
               }
             : {}),
-          ...(has("order_update") || has("warehouse_update") ? { delivery_type: z.string().max(100).optional(), note: z.string().max(1000).optional() } : {}),
-          ...(has("warehouse_update")
-            ? { title: z.string().max(100).optional(), buyer_order: z.string().max(30).optional(), confirm_transfer: z.boolean().optional() }
-            : {}),
+          ...(has("order_update") || has("warehouse_update") ? { delivery_type: z.string().max(100).optional() } : {}),
+          ...(has("order_update") || has("warehouse_update") || offerEdits ? { note: z.string().max(1000).optional().describe('On an offer "" clears it.') } : {}),
+          ...(has("warehouse_update") || offerEdits ? { title: z.string().max(100).optional() } : {}),
+          ...(has("warehouse_update") ? { buyer_order: z.string().max(30).optional(), confirm_transfer: z.boolean().optional() } : {}),
           language: z.enum(["sl", "en"]).default("sl").describe("Language of the summary the user confirms."),
         }),
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       },
-      async (args) => run(async () => recordAnswer(await buildUpdateDraft(recordContext(), args as UpdateInput))),
+      async (args) =>
+        run(async () => {
+          if (args.doc_type !== "sales_offer") {
+            const misplaced = ["lines", "valid_days"].filter((k) => (args as Record<string, unknown>)[k] !== undefined);
+            if (misplaced.length) throw new DraftError(`${misplaced.join(", ")}: only for offers (sales_offer).`);
+            return recordAnswer(await buildUpdateDraft(recordContext(), args as UpdateInput));
+          }
+          const { doc_type: _type, status, ...offer } = args as Record<string, unknown>;
+          const other = Object.keys(offer).filter((k) => !["number", "id", "lines", "title", "note", "valid_days", "language"].includes(k) && offer[k] !== undefined);
+          if (status !== undefined) other.unshift("status");
+          if (other.length) throw new DraftError(`${other.join(", ")}: can't be changed on an offer here. An offer takes: lines, title, note, valid_days.`);
+          try {
+            return withLines(await buildOfferEditDraft(recordContext(), offer as OfferEditInput));
+          } catch (error) {
+            throw missingHint(error);
+          }
+        }),
     );
   }
 
