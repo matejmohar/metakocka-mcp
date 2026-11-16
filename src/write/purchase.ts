@@ -79,6 +79,12 @@ export interface PurchaseInfo {
 }
 
 const HISTORY_MAX = 500;
+
+export const SELF_ASSESS_WARNING =
+  "Lines without VAT on a foreign supplier's invoice are usually self-assessed (samoobdavčitev, e.g. reverse charge under Article 196). " +
+  "Metakocka's API can't set or read the Samoobdavčitev checkbox: after saving, the user ticks it on the invoice in Metakocka (unless the invoice is not self-assessed, e.g. VAT paid at import).";
+export const SELF_ASSESS_AFTER_SAVE =
+  "Tick Samoobdavčitev on this invoice in Metakocka (the checkbox at the bottom right of the header): Metakocka's API can't set it.";
 const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
 const ATTACHMENT_TYPES = new Set([".pdf", ".png", ".jpg", ".jpeg", ".xml"]);
 
@@ -188,6 +194,10 @@ export async function buildPurchaseDraft(
 
   const attachment = input.attachment_path ? await readAttachment(input.attachment_path, ctx.localFiles) : undefined;
 
+  // A foreign supplier's invoice without VAT is usually self-assessed (samoobdavčitev: reverse charge, Article 196).
+  // Metakocka's API neither takes nor returns its checkbox, so the user ticks it by hand.
+  const selfAssess = foreignInvoice && lines.some((l) => l.taxRatePercent === 0);
+
   const sl = (input.language ?? "sl") === "sl";
   const leftOutNote = leftOut.length
     ? (sl ? "Ročno dodaj vrstice, ki jih API ne sprejme: " : "Add by hand the lines the API doesn't take: ") +
@@ -195,6 +205,7 @@ export async function buildPurchaseDraft(
     : undefined;
   const note = [input.note?.trim(), leftOutNote].filter(Boolean).join("\n") || undefined;
   if (leftOut.length) warnings.push(`${leftOut.length} negative line(s) are left out: add them in Metakocka after saving. ${leftOutNote}`);
+  if (selfAssess) warnings.push(SELF_ASSESS_WARNING);
 
   const payload: MkRecord = {
     doc_type: input.doc_type,
@@ -230,6 +241,7 @@ export async function buildPurchaseDraft(
     payload,
     summary: "",
     ...(attachment ? { attachment } : {}),
+    ...(selfAssess ? { afterSave: [SELF_ASSESS_AFTER_SAVE] } : {}),
   });
   payload.document_change_log_notes = `${CHANGE_LOG_PREFIX} ${draft.id}`;
   const info: PurchaseInfo = {
@@ -241,7 +253,7 @@ export async function buildPurchaseDraft(
     ...(leftOut.length ? { left_out: leftOut } : {}),
     ...(attachment ? { attachment: attachment.fileName } : {}),
   };
-  draft.summary = summarize(draft, { ...info, descriptions, note: input.note?.trim(), leftOut, service_from: input.service_from, service_to: input.service_to }, ctx.installation);
+  draft.summary = summarize(draft, { ...info, selfAssess, descriptions, note: input.note?.trim(), leftOut, service_from: input.service_from, service_to: input.service_to }, ctx.installation);
   return { draft, warnings, info };
 }
 
@@ -307,6 +319,7 @@ function summarize(
   d: Draft,
   extra: PurchaseInfo & {
     descriptions: (string | undefined)[];
+    selfAssess: boolean;
     note?: string;
     leftOut: { description: string; total: number }[];
     service_from?: string;
@@ -327,6 +340,7 @@ function summarize(
         due: "rok plačila",
         leftOut: "⚠ NI VNESENO — dodaj ročno v Metakocki (navedeno tudi v opombi računa)",
         file: "Priloga",
+        selfAssess: "⚠ Po shranjevanju v Metakocki obkljukaj Samoobdavčitev (API je ne nastavi)",
       }
     : {
         head: foreign ? "Enter a FOREIGN RECEIVED INVOICE" : "Enter a RECEIVED INVOICE",
@@ -338,6 +352,7 @@ function summarize(
         due: "due",
         leftOut: "⚠ LEFT OUT — add by hand in Metakocka (also in the invoice note)",
         file: "Attachment",
+        selfAssess: "⚠ After saving, tick Samoobdavčitev in Metakocka (the API can't set it)",
       };
   // Lines with the supplier's description.
   const withDesc = { ...d, lines: d.lines.map((l, i) => ({ ...l, name: extra.descriptions[i] ? `${l.name} (${oneLine(extra.descriptions[i]!)})` : l.name })) };
@@ -360,5 +375,6 @@ function summarize(
       ...(installation ? [`Metakocka: ${installation}`] : []),
     ].join(" · "),
     ...(extra.attachment ? [`${t.file}: ${extra.attachment}`] : []),
+    ...(extra.selfAssess ? ["", t.selfAssess] : []),
   ].join("\n");
 }

@@ -914,6 +914,24 @@ describe("purchase invoices", () => {
     expect(sent.notes).toBe("Ročno dodaj vrstice, ki jih API ne sprejme: Unused time after 30 Sep 2026 (Domene) −42,27 €");
   });
 
+  it("reminds to tick Samoobdavčitev on a foreign invoice without VAT, in the summary, the warnings and after saving", async () => {
+    const fake = metakocka({ partners: [FOREIGN_SUPPLIER] });
+    const { client } = await connect(fake, { write: write() });
+    const { body } = await draft(client, { ...OPENAI, invoice_total: 187.7, lines: [OPENAI.lines[0]] });
+    expect(body.summary).toMatch(/\n\n⚠ Po shranjevanju v Metakocki obkljukaj Samoobdavčitev \(API je ne nastavi\)$/);
+    expect(body.warnings).toEqual([expect.stringMatching(/^Lines without VAT on a foreign supplier's invoice are usually self-assessed \(samoobdavčitev/)]);
+    const r = parse(await client.callTool({ name: "commit_document", arguments: { draft_id: body.draft_id } }));
+    expect(r.status).toBe("created");
+    expect(r.warnings).toEqual([expect.stringMatching(/^Tick Samoobdavčitev on this invoice in Metakocka/)]);
+
+    // With VAT charged on every line, nothing to tick.
+    const { body: vat } = await draft(client, { ...OPENAI, supplier_invoice_number: "TYJI3TBO-0009", invoice_total: 229, lines: [{ ...OPENAI.lines[0], vat_percent: 22 }] });
+    if (typeof vat === "object") {
+      expect(vat.summary).not.toMatch(/Samoobdavčitev/);
+      expect(vat.warnings ?? []).not.toContainEqual(expect.stringMatching(/samoobdavčitev/));
+    }
+  });
+
   it("attaches the supplier's file once saved, only when the server runs locally", async () => {
     const dir = await mkdtemp(join(tmpdir(), "mk-att-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
@@ -1299,6 +1317,22 @@ describe("payments", () => {
     const body = parse(await client.callTool({ name: "draft_payment", arguments: { doc_type: "sales_bill_domestic", number: "RD-2/2026", amount: 100, note: "nakazilo" } }));
     expect(body.summary).toMatch(/^Zabeleži PLAČILO 100,00 € na RD-2\/2026 \(ACME d.o.o.\)\nDatum 2026-10-05 · Kartica\nOpomba: nakazilo\n/);
     expect(body.warnings).toEqual(["RD-2/2026 already has a payment of 100 on 2026-10-05. Make sure this is another one."]);
+  });
+
+  it("checks a given payment type when drafting: Metakocka's types and ones earlier payments use, spelled as Metakocka has them", async () => {
+    const { fake, transactions } = withInvoice();
+    const { client } = await connect(fake, { write: quiet(PAYMENTS) });
+    const call = async (payment_type: string) =>
+      parse(await client.callTool({ name: "draft_payment", arguments: { doc_type: "sales_bill_domestic", number: "RD-2/2026", amount: 100, payment_type } }));
+    const refused = await call("Debetna kartica");
+    expect(refused).toMatch(/Metakocka has no payment type "Debetna kartica"/);
+    expect(refused).toMatch(/"Transakcijski račun", "Gotovina", "Prenos preplačila", "Kartica BA", "Kartica"/);
+    expect((await call("gotovina")).summary).toMatch(/· Gotovina\n/);
+    expect((await call("transakcijski  račun")).summary).toMatch(/· Transakcijski račun\n/);
+    expect((await call("Kartica")).summary).toMatch(/· Kartica\n/);
+    const ba = await call("Kartica BA");
+    expect(ba.warnings).toEqual([expect.stringMatching(/fiscal cash register/)]);
+    expect(transactions).toHaveLength(0);
   });
 
   it("refuses to save when the paid amount changed since drafting", async () => {

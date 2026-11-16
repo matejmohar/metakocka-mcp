@@ -161,7 +161,9 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
             "a product marked for purchasing — the one the supplier's earlier invoices use (search_documents). Give a credit " +
             "line as a negative price: Metakocka's API can't take it, so it is left out and the user adds it by hand. The lines " +
             "must add up to invoice_total. Saving also makes the stock receipt (prevzemnica). Pass attachment_path to attach " +
-            "the supplier's PDF. An invoice number already entered for that supplier is refused. "
+            "the supplier's PDF. An invoice number already entered for that supplier is refused. A foreign supplier's invoice " +
+            "without VAT is usually self-assessed (samoobdavčitev): Metakocka's API can't set that checkbox, so the draft and " +
+            "the save remind the user to tick Samoobdavčitev on the invoice in Metakocka; pass that reminder on. "
           : "") +
         "Returns a draft_id and a summary: show the summary to the user, then call commit_document with the draft_id to save it. " +
         "Drafts expire after 15 minutes.",
@@ -451,7 +453,14 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext, write: W
           amount: z.number().positive().max(100_000_000).optional().describe("Amount in the document's currency; default: everything still open (for a refund: everything paid)."),
           date: z.string().optional().describe("When it was paid, YYYY-MM-DD; default today."),
           mode: z.enum(["payment", "prepayment", "return"]).default("payment").describe("payment (plačilo), prepayment (avans, on offers and orders) or return (vračilo)."),
-          payment_type: z.string().max(100).optional().describe('As in Metakocka, e.g. "Transakcijski račun", "Gotovina", "Kartica"; default: the usual one.'),
+          payment_type: z
+            .string()
+            .max(100)
+            .optional()
+            .describe(
+              'As in Metakocka: "Transakcijski račun" (bank transfer, also a card paid through the bank), "Gotovina" (cash), ' +
+                '"Prenos preplačila" (overpayment carried over) or "Kartica BA" (card through a fiscal cash register); default: the usual one. Other types are refused.',
+            ),
           cash_register: z.string().max(100).optional().describe("Cash payments with several cash registers: which one."),
           note: z.string().max(100).optional(),
           language: z.enum(["sl", "en"]).default("sl").describe("Language of the summary the user confirms."),

@@ -123,6 +123,7 @@ async function finishCommitted(ctx: CommitContext, draft: Draft, mkId: string, n
   } catch (error) {
     warnings.push(`The document was saved, but reading it back to check it failed: ${error instanceof Error ? error.message : String(error)}`);
   }
+  warnings.push(...(draft.afterSave ?? []));
   const file = draft.attachment;
   if (file && !file.attached) {
     try {

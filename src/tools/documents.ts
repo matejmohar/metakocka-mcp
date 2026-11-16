@@ -129,7 +129,8 @@ export function registerDocumentTools(server: McpServer, ctx: ToolContext): void
       description:
         "Get one Metakocka document in full: partner and receiver, line items (products, quantities, prices, discounts, tax), " +
         "totals, payment status, linked documents. Identify it either by its internal id (from search_documents) or by " +
-        "its number as shown in Metakocka (e.g. 'PP-18495').",
+        "its number as shown in Metakocka (e.g. 'PP-18495'). Metakocka's API doesn't return the header checkboxes of received " +
+          "invoices (Samoobdavčitev, Neodbitno, Ne upoštevaj v DDV evidenci): say so rather than guessing whether one is ticked.",
       inputSchema: z
         .object({
           doc_type: docTypeSchema,

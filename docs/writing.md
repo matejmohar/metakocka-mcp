@@ -97,6 +97,9 @@ Received invoices in particular:
 - **Payment term** as on the invoice, else from the supplier (its term in Metakocka or its last invoice).
 - **The PDF is attached** to the invoice in Metakocka when Claude passes its path (only when the server runs on your
   computer, not in HTTP mode).
+- **Samoobdavčitev (self-assessment).** A foreign supplier's invoice with lines without VAT (e.g. reverse charge under
+  Article 196) usually needs the *Samoobdavčitev* checkbox. Metakocka's API neither sets nor returns it, so the summary
+  and the save remind you to tick it on the invoice in Metakocka, and `get_document` can't show it.
 
 New partners and products (`partners`, `products`):
 
@@ -113,7 +116,9 @@ Payments in particular:
 - **Never more than is open.** The amount defaults to what is still open on the document (for a refund: what was paid)
   and can't be more. An invoice paid in full is refused.
 - **Payment type** as on the document's earlier payments, else the one most used on the latest documents of its type
-  (usually *Transakcijski račun*). Metakocka refuses a type that isn't in its register.
+  (usually *Transakcijski račun*). A given type must be one Metakocka takes: *Transakcijski račun*, *Gotovina*,
+  *Prenos preplačila* or *Kartica BA* (fiscal cash registers only), or one earlier payments use. Anything else, such as
+  *Debetna kartica*, is refused when drafting, not by Metakocka when saving.
 - **Checked twice.** If the document's paid amount changed since the draft (e.g. someone entered the payment in
   Metakocka meanwhile), nothing is saved. After saving, the paid amount must have moved by exactly the payment.
 

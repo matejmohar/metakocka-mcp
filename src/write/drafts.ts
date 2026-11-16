@@ -68,6 +68,8 @@ export interface Draft {
   summary: string;
   /** A file to attach once the document is saved (purchase invoices: the supplier's PDF). Never logged. */
   attachment?: { fileName: string; dataB64: string; bytes: number; attached?: boolean };
+  /** What the user still has to do by hand in Metakocka once it is saved; returned with the commit's warnings. */
+  afterSave?: string[];
   /** A change to an existing document (payment, status): which one, and what it looked like when drafted. */
   target?: {
     docType: string;
