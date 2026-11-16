@@ -1301,6 +1301,22 @@ describe("payments", () => {
     expect(body.warnings).toEqual(["RD-2/2026 already has a payment of 100 on 2026-10-05. Make sure this is another one."]);
   });
 
+  it("checks a given payment type when drafting: Metakocka's types and ones earlier payments use, spelled as Metakocka has them", async () => {
+    const { fake, transactions } = withInvoice();
+    const { client } = await connect(fake, { write: quiet(PAYMENTS) });
+    const call = async (payment_type: string) =>
+      parse(await client.callTool({ name: "draft_payment", arguments: { doc_type: "sales_bill_domestic", number: "RD-2/2026", amount: 100, payment_type } }));
+    const refused = await call("Debetna kartica");
+    expect(refused).toMatch(/Metakocka has no payment type "Debetna kartica"/);
+    expect(refused).toMatch(/"Transakcijski račun", "Gotovina", "Prenos preplačila", "Kartica BA", "Kartica"/);
+    expect((await call("gotovina")).summary).toMatch(/· Gotovina\n/);
+    expect((await call("transakcijski  račun")).summary).toMatch(/· Transakcijski račun\n/);
+    expect((await call("Kartica")).summary).toMatch(/· Kartica\n/);
+    const ba = await call("Kartica BA");
+    expect(ba.warnings).toEqual([expect.stringMatching(/fiscal cash register/)]);
+    expect(transactions).toHaveLength(0);
+  });
+
   it("refuses to save when the paid amount changed since drafting", async () => {
     const { fake, invoice, transactions } = withInvoice();
     const { client } = await connect(fake, { write: quiet({ ...PAYMENTS, confirm: "never" }) });

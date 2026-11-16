@@ -113,7 +113,9 @@ Payments in particular:
 - **Never more than is open.** The amount defaults to what is still open on the document (for a refund: what was paid)
   and can't be more. An invoice paid in full is refused.
 - **Payment type** as on the document's earlier payments, else the one most used on the latest documents of its type
-  (usually *Transakcijski račun*). Metakocka refuses a type that isn't in its register.
+  (usually *Transakcijski račun*). A given type must be one Metakocka takes: *Transakcijski račun*, *Gotovina*,
+  *Prenos preplačila* or *Kartica BA* (fiscal cash registers only), or one earlier payments use. Anything else, such as
+  *Debetna kartica*, is refused when drafting, not by Metakocka when saving.
 - **Checked twice.** If the document's paid amount changed since the draft (e.g. someone entered the payment in
   Metakocka meanwhile), nothing is saved. After saving, the paid amount must have moved by exactly the payment.
 

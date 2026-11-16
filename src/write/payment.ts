@@ -88,11 +88,16 @@ export async function buildPaymentDraft(ctx: BuildContext, input: PaymentInput):
   const docDate = fromMkDate(doc.doc_date);
   if (docDate && date < docDate && mode !== "prepayment") warnings.push(`The payment date ${date} is before the document's date ${docDate}.`);
 
-  const paymentType = input.payment_type?.trim() || (await usualPaymentType(ctx.client, doc, input.doc_type));
+  const paymentType = input.payment_type?.trim()
+    ? await checkedPaymentType(ctx.client, doc, input.doc_type, input.payment_type.trim())
+    : await usualPaymentType(ctx.client, doc, input.doc_type);
   if (!paymentType) {
     throw new DraftError(
       'There are no earlier payments to take the payment type from. Ask the user how it was paid (e.g. "Transakcijski račun" for a bank transfer, "Gotovina" for cash) and pass payment_type.',
     );
+  }
+  if (paymentType === "Kartica BA") {
+    warnings.push("Kartica BA is a card payment through a fiscal cash register; Metakocka takes it only where fiscal cash registers are turned on.");
   }
 
   // The same payment already on the document is probably this one, entered before.
@@ -158,20 +163,49 @@ function parseSl(value: unknown): number | undefined {
   return typeof value === "string" ? num(value.replace(/\./g, "").replace(",", ".")) : undefined;
 }
 
+/**
+ * Payment types Metakocka's put_transaction takes. It refuses anything else at save time
+ * (e.g. "Debetna kartica"), so a given type is checked when drafting. Kartica BA needs fiscal cash registers.
+ */
+export const PAYMENT_TYPES = ["Transakcijski račun", "Gotovina", "Prenos preplačila", "Kartica BA"] as const;
+
+/** Payment types on these documents' payments, most used first. */
+function typesUsed(docs: MkRecord[]): string[] {
+  const counts = new Map<string, number>();
+  for (const d of docs) for (const p of asArray<MkRecord>(d.mark_paid)) {
+    const t = str(p.payment_type)?.trim();
+    if (t) counts.set(t, (counts.get(t) ?? 0) + 1);
+  }
+  return [...counts].sort((a, b) => b[1] - a[1]).map(([t]) => t);
+}
+
 /** The payment type used most on this document, else on the latest documents of its type. */
 async function usualPaymentType(client: MetakockaClient, doc: MkRecord, docType: PayableType): Promise<string | undefined> {
-  const mostCommon = (docs: MkRecord[]) => {
-    const counts = new Map<string, number>();
-    for (const d of docs) for (const p of asArray<MkRecord>(d.mark_paid)) {
-      const t = str(p.payment_type);
-      if (t) counts.set(t, (counts.get(t) ?? 0) + 1);
-    }
-    return [...counts].sort((a, b) => b[1] - a[1])[0]?.[0];
-  };
-  const own = mostCommon([doc]);
+  const own = typesUsed([doc])[0];
   if (own) return own;
   const { documents } = await searchDocuments(client, { docType, paymentDetail: true, limit: 100 });
-  return mostCommon(documents);
+  return typesUsed(documents)[0];
+}
+
+/**
+ * A given payment type, spelled as Metakocka has it: one of PAYMENT_TYPES, or a type earlier payments
+ * on this document or the latest documents of its type use (those Metakocka took). Anything else is refused now
+ * rather than by Metakocka at save time.
+ */
+async function checkedPaymentType(client: MetakockaClient, doc: MkRecord, docType: PayableType, given: string): Promise<string> {
+  const key = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+  const match = (types: readonly string[]) => types.find((t) => key(t) === key(given));
+  const known = match(PAYMENT_TYPES) ?? match(typesUsed([doc]));
+  if (known) return known;
+  const { documents } = await searchDocuments(client, { docType, paymentDetail: true, limit: 100 });
+  const used = typesUsed(documents);
+  const fromHistory = match(used);
+  if (fromHistory) return fromHistory;
+  const valid = [...new Set([...PAYMENT_TYPES, ...used])];
+  throw new DraftError(
+    `Metakocka has no payment type "${given}"; it takes ${valid.map((t) => `"${t}"`).join(", ")}. ` +
+      'A card paid through the bank (debit or credit) is "Transakcijski račun"; "Kartica BA" is only for fiscal cash registers. Nothing was drafted.',
+  );
 }
 
 /** Save a payment: one put_transaction, never retried, then check the document's paid amount. */
